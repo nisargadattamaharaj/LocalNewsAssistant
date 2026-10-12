@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import com.example.localnewsassistant.model.ModelImportValidator
@@ -80,6 +81,23 @@ fun MainScreen(
         }
     }
 
+    MainScreenContent(
+        uiState = uiState,
+        onImportClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+        onCheckInterfaceClick = { isInterfaceChecked = true },
+        modifier = modifier,
+        isInterfaceChecked = isInterfaceChecked
+    )
+}
+
+@Composable
+fun MainScreenContent(
+    uiState: ModelUiState,
+    onImportClick: () -> Unit,
+    onCheckInterfaceClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isInterfaceChecked: Boolean = false
+) {
     val isActionDisabled = uiState is ModelUiState.Loading || uiState is ModelUiState.Importing || uiState is ModelUiState.IndeterminateError
 
     Column(
@@ -98,7 +116,7 @@ fun MainScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        when (val state = uiState) {
+        when (uiState) {
             is ModelUiState.Loading -> {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator()
@@ -120,34 +138,34 @@ fun MainScreen(
             }
 
             is ModelUiState.Importing -> {
-                ImportingProgressCard(state = state)
+                ImportingProgressCard(state = uiState)
             }
 
             is ModelUiState.Imported -> {
-                ModelInfoCard(metadata = state.metadata)
+                ModelInfoCard(metadata = uiState.metadata)
             }
 
             is ModelUiState.Corrupted -> {
                 CorruptedCard(
-                    originalName = state.originalName,
-                    message = state.message
+                    originalName = uiState.originalName,
+                    message = uiState.message
                 )
             }
 
             is ModelUiState.IndeterminateError -> {
-                IndeterminateCard(message = state.message)
+                IndeterminateCard(message = uiState.message)
             }
 
             is ModelUiState.Error -> {
-                ErrorCard(message = state.message)
-                if (state.previousMetadata != null) {
+                ErrorCard(message = uiState.message)
+                if (uiState.previousMetadata != null) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = "Ранее импортированная модель:",
                         style = MaterialTheme.typography.titleSmall
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    ModelInfoCard(metadata = state.previousMetadata)
+                    ModelInfoCard(metadata = uiState.previousMetadata)
                 }
             }
         }
@@ -155,9 +173,7 @@ fun MainScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         Button(
-            onClick = {
-                filePickerLauncher.launch(arrayOf("*/*"))
-            },
+            onClick = onImportClick,
             enabled = !isActionDisabled,
             modifier = Modifier.fillMaxWidth(0.8f)
         ) {
@@ -167,7 +183,7 @@ fun MainScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         OutlinedButton(
-            onClick = { isInterfaceChecked = true },
+            onClick = onCheckInterfaceClick,
             modifier = Modifier.fillMaxWidth(0.8f)
         ) {
             Text("Проверить интерфейс")
@@ -368,5 +384,70 @@ fun ErrorCard(message: String) {
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
         }
+    }
+}
+
+@Preview(showBackground = true, name = "1. Модель отсутствует")
+@Composable
+fun MainScreenNoModelPreview() {
+    LocalNewsAssistantTheme {
+        MainScreenContent(
+            uiState = ModelUiState.NoModel,
+            onImportClick = {},
+            onCheckInterfaceClick = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "2. Идет импорт модели")
+@Composable
+fun MainScreenImportingPreview() {
+    LocalNewsAssistantTheme {
+        MainScreenContent(
+            uiState = ModelUiState.Importing(
+                copiedBytes = 524288000L,
+                totalBytes = 1073741824L,
+                originalName = "gemma-2b-it-q4.litertlm"
+            ),
+            onImportClick = {},
+            onCheckInterfaceClick = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "3. Модель импортирована")
+@Composable
+fun MainScreenImportedPreview() {
+    LocalNewsAssistantTheme {
+        MainScreenContent(
+            uiState = ModelUiState.Imported(
+                metadata = ModelMetadata(
+                    originalName = "gemma-2b-it-q4.litertlm",
+                    sizeBytes = 1073741824L,
+                    internalFileName = "model_12345.bin"
+                )
+            ),
+            onImportClick = {},
+            onCheckInterfaceClick = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "4. Ошибка импорта")
+@Composable
+fun MainScreenErrorPreview() {
+    LocalNewsAssistantTheme {
+        MainScreenContent(
+            uiState = ModelUiState.Error(
+                message = "Выбран неверный формат файла. Требуется файл с расширением .litertlm",
+                previousMetadata = ModelMetadata(
+                    originalName = "old_gemma-2b.litertlm",
+                    sizeBytes = 800000000L,
+                    internalFileName = "model_old.bin"
+                )
+            ),
+            onImportClick = {},
+            onCheckInterfaceClick = {}
+        )
     }
 }

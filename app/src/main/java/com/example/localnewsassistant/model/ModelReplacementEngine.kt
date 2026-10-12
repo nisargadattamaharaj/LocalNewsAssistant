@@ -8,8 +8,8 @@ sealed interface ReplacementResult {
 
 interface FileOperations {
     fun createTempFile(): Boolean
-    suspend fun writeData(): Boolean
-    fun finalizeNewFile(): Boolean
+    suspend fun writeData(): Long // returns actual copied size in bytes
+    fun finalizeNewFile(expectedSize: Long): Boolean
     fun deleteTempFile()
     fun deleteNewFile()
     fun deleteOldFile(oldFileName: String): Boolean
@@ -22,36 +22,38 @@ interface MetadataOperations {
 
 class ModelReplacementEngine {
 
-    suspend fun executeReplacement(
+    fun finalizeAndCommit(
         newMetadata: ModelMetadata,
         fileOps: FileOperations,
         metaOps: MetadataOperations
     ): ReplacementResult {
         val oldMetadata = metaOps.getActiveMetadata()
 
-        if (!fileOps.createTempFile() || !fileOps.writeData()) {
-            fileOps.deleteTempFile()
-            return ReplacementResult.RollbackSucceeded(
-                error = "Ошибка записи временного файла",
-                activeMetadata = oldMetadata
-            )
-        }
-
-        if (!fileOps.finalizeNewFile()) {
+        if (!fileOps.finalizeNewFile(newMetadata.sizeBytes)) {
             fileOps.deleteTempFile()
             fileOps.deleteNewFile()
             return ReplacementResult.RollbackSucceeded(
-                error = "Ошибка завершения создания нового файла",
+                error = "Ошибка финализации нового файла модели",
                 activeMetadata = oldMetadata
             )
         }
 
-        // Critical section: commit new metadata
-        val commitSuccess = metaOps.saveMetadataCommit(newMetadata)
+        // Commit new metadata with exception handling
+        val commitSuccess = try {
+            metaOps.saveMetadataCommit(newMetadata)
+        } catch (e: Exception) {
+            return ReplacementResult.IndeterminateStorageError(
+                error = "Сбой при записи метаданных: ${e.localizedMessage ?: "Неизвестная ошибка"}. Неопределённое состояние хранилища."
+            )
+        }
 
         if (!commitSuccess) {
-            // Commit failed. Attempt to restore old metadata state
-            val restoreSuccess = metaOps.saveMetadataCommit(oldMetadata)
+            // Commit returned false! Attempt rollback
+            val restoreSuccess = try {
+                metaOps.saveMetadataCommit(oldMetadata)
+            } catch (_: Exception) {
+                false
+            }
 
             return if (restoreSuccess) {
                 fileOps.deleteNewFile()
@@ -60,18 +62,20 @@ class ModelReplacementEngine {
                     activeMetadata = oldMetadata
                 )
             } else {
-                // NEITHER new metadata commit NOR rollback commit was confirmed on disk!
-                // Do NOT delete newFile or oldFile!
+                // Indeterminate state: commit returned false AND restore returned false/failed!
                 ReplacementResult.IndeterminateStorageError(
                     error = "Неопределённое состояние хранилища: произошла ошибка записи и отката метаданных на диск."
                 )
             }
         }
 
-        // Commit of new metadata succeeded
+        // CONFIRMED COMMIT SUCCESS!
         if (oldMetadata != null && oldMetadata.internalFileName != newMetadata.internalFileName) {
-            fileOps.deleteOldFile(oldMetadata.internalFileName)
-            // Failure deleting old file post-replacement is non-fatal: new model is active.
+            try {
+                fileOps.deleteOldFile(oldMetadata.internalFileName)
+            } catch (_: Exception) {
+                // Failure or exception when deleting old file post-replacement is non-fatal.
+            }
         }
 
         return ReplacementResult.Success(newMetadata)

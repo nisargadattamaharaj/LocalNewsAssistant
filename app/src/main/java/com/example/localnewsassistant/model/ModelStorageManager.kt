@@ -185,8 +185,9 @@ object ModelStorageManager {
                     return true
                 }
 
-                override suspend fun writeData(): Boolean {
-                    val inputStream = context.contentResolver.openInputStream(uri) ?: return false
+                override suspend fun writeData(): Long {
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                        ?: throw IOException("Не удалось открыть документ")
                     inputStream.use { input ->
                         FileOutputStream(tempFile).use { output ->
                             val buffer = ByteArray(BUFFER_SIZE)
@@ -213,21 +214,16 @@ object ModelStorageManager {
                         }
                     }
 
-                    if (!tempFile.exists() || tempFile.length() <= 0L) return false
-                    if (totalSize > 0 && tempFile.length() != totalSize) return false
-                    return true
+                    return tempFile.length()
                 }
 
-                override fun finalizeNewFile(): Boolean {
-                    if (!tempFile.exists() || tempFile.length() <= 0L) return false
+                override fun finalizeNewFile(expectedSize: Long): Boolean {
+                    if (!tempFile.exists() || tempFile.length() != expectedSize) return false
                     val renamed = tempFile.renameTo(newFile)
                     if (!renamed) {
-                        runCatching {
-                            tempFile.copyTo(newFile, overwrite = true)
-                            tempFile.delete()
-                        }
+                        return false // No dangerous fallback copyTo!
                     }
-                    return newFile.exists() && newFile.length() > 0L
+                    return newFile.exists() && newFile.isFile && newFile.length() == expectedSize
                 }
 
                 override fun deleteTempFile() {
@@ -264,29 +260,50 @@ object ModelStorageManager {
                 }
             }
 
+            var confirmedMetadata: ModelMetadata? = null
             var replacementResult: ReplacementResult? = null
 
             try {
-                // Critical Section: Execute model replacement with NonCancellable protection
-                withContext(NonCancellable) {
-                    val expectedMetadata = ModelMetadata(
-                        originalName = displayName,
-                        sizeBytes = if (tempFile.exists()) tempFile.length() else totalSize,
-                        internalFileName = newInternalFileName
-                    )
+                // 1. Cancellable copy phase
+                fileOps.createTempFile()
+                val actualSize = fileOps.writeData()
 
+                if (totalSize > 0 && actualSize != totalSize) {
+                    fileOps.deleteTempFile()
+                    throw IOException("Размер скопированных данных ($actualSize Б) не совпадает с заявленным ($totalSize Б)")
+                }
+                if (actualSize <= 0) {
+                    fileOps.deleteTempFile()
+                    throw IOException("Файл модели пуст (0 байт)")
+                }
+
+                // Check cancellation right before non-cancellable commit
+                currentCoroutineContext().ensureActive()
+
+                val expectedMetadata = ModelMetadata(
+                    originalName = displayName,
+                    sizeBytes = actualSize,
+                    internalFileName = newInternalFileName
+                )
+
+                // 2. Short NonCancellable finalization & commit section
+                withContext(NonCancellable) {
                     val engine = ModelReplacementEngine()
-                    replacementResult = engine.executeReplacement(expectedMetadata, fileOps, metaOps)
+                    val res = engine.finalizeAndCommit(expectedMetadata, fileOps, metaOps)
+                    replacementResult = res
+                    if (res is ReplacementResult.Success) {
+                        confirmedMetadata = res.metadata
+                    }
                 }
 
             } catch (e: CancellationException) {
-                if (replacementResult == null) {
+                if (confirmedMetadata == null && replacementResult !is ReplacementResult.Success && replacementResult !is ReplacementResult.IndeterminateStorageError) {
                     fileOps.deleteTempFile()
                     fileOps.deleteNewFile()
                 }
                 throw e
             } catch (e: Exception) {
-                if (replacementResult == null) {
+                if (confirmedMetadata == null && replacementResult !is ReplacementResult.Success && replacementResult !is ReplacementResult.IndeterminateStorageError) {
                     fileOps.deleteTempFile()
                     fileOps.deleteNewFile()
                 }
