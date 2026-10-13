@@ -35,4 +35,12 @@ class ModelImportValidatorTest {
         val mbStr = ModelImportValidator.formatFileSize(1024 * 1024)
         assertTrue(mbStr.endsWith("МБ") && (mbStr.startsWith("1.0") || mbStr.startsWith("1,0")))
     }
+
+    @Test
+    fun testInternalFileNameExtension() {
+        val fileName = com.example.localnewsassistant.model.ModelStorageManager.generateInternalFileName("12345")
+        assertEquals("model_12345.litertlm", fileName)
+        assertTrue(fileName.endsWith(".litertlm"))
+        assertTrue(fileName.startsWith("model_"))
+    }
 }

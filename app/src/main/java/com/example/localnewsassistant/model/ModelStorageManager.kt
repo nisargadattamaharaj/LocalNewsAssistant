@@ -31,6 +31,14 @@ object ModelStorageManager {
         return dir
     }
 
+    fun getActiveModelFile(context: Context, internalFileName: String): File {
+        return File(getModelsDir(context), internalFileName)
+    }
+
+    fun generateInternalFileName(uniqueId: String = "${System.currentTimeMillis()}_${(1000..9999).random()}"): String {
+        return "model_$uniqueId.litertlm"
+    }
+
     suspend fun cleanTempFiles(context: Context, activeFileName: String? = null) {
         withContext(Dispatchers.IO) {
             val modelsDir = getModelsDir(context)
@@ -74,7 +82,7 @@ object ModelStorageManager {
                     )
                 }
 
-                val modelFile = File(getModelsDir(context), internalFileName)
+                val modelFile = getActiveModelFile(context, internalFileName)
 
                 if (!modelFile.exists()) {
                     return@withContext ModelLoadResult.Corrupted(
@@ -173,7 +181,7 @@ object ModelStorageManager {
             }
 
             val uniqueId = "${System.currentTimeMillis()}_${(1000..9999).random()}"
-            val newInternalFileName = "model_$uniqueId.bin"
+            val newInternalFileName = generateInternalFileName(uniqueId)
             val tempFileName = "temp_$uniqueId.bin"
 
             val tempFile = File(modelsDir, tempFileName)

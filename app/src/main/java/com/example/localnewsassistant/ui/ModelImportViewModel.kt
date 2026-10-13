@@ -5,9 +5,14 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.localnewsassistant.model.IndeterminateStorageException
+import com.example.localnewsassistant.model.LiteRtLmInferenceService
+import com.example.localnewsassistant.model.LlmExecutionResult
+import com.example.localnewsassistant.model.LlmExecutionRunner
+import com.example.localnewsassistant.model.LlmInferenceService
 import com.example.localnewsassistant.model.ModelLoadResult
 import com.example.localnewsassistant.model.ModelMetadata
 import com.example.localnewsassistant.model.ModelStorageManager
+import com.example.localnewsassistant.model.TestPromptOption
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,13 +51,38 @@ sealed interface ModelUiState {
     ) : ModelUiState
 }
 
-class ModelImportViewModel(application: Application) : AndroidViewModel(application) {
+sealed interface LlmExecutionState {
+    object Idle : LlmExecutionState
+    object Initializing : LlmExecutionState
+    object Generating : LlmExecutionState
+    data class Success(val result: LlmExecutionResult) : LlmExecutionState
+    data class Error(val message: String) : LlmExecutionState
+}
+
+class ModelImportViewModel @JvmOverloads constructor(
+    application: Application,
+    llmInferenceService: LlmInferenceService = LiteRtLmInferenceService()
+) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow<ModelUiState>(ModelUiState.Loading)
     val uiState: StateFlow<ModelUiState> = _uiState.asStateFlow()
 
+    private val llmRunner = LlmExecutionRunner(llmInferenceService)
+    val llmState: StateFlow<LlmExecutionState> = llmRunner.llmState
+
+    private val _selectedPromptOption = MutableStateFlow(TestPromptOption.OPTION_A)
+    val selectedPromptOption: StateFlow<TestPromptOption> = _selectedPromptOption.asStateFlow()
+
     init {
         loadSavedModel()
+    }
+
+    fun selectPromptOption(option: TestPromptOption) {
+        val currentLlmState = llmState.value
+        if (currentLlmState is LlmExecutionState.Initializing || currentLlmState is LlmExecutionState.Generating) {
+            return
+        }
+        _selectedPromptOption.value = option
     }
 
     fun loadSavedModel() {
@@ -78,8 +108,14 @@ class ModelImportViewModel(application: Application) : AndroidViewModel(applicat
 
     fun importModel(uri: Uri) {
         val currentState = _uiState.value
-        // Lock operation immediately on calling thread before any async query
-        if (currentState is ModelUiState.Loading || currentState is ModelUiState.Importing || currentState is ModelUiState.IndeterminateError) {
+        val currentLlmState = llmState.value
+
+        if (currentState is ModelUiState.Loading ||
+            currentState is ModelUiState.Importing ||
+            currentState is ModelUiState.IndeterminateError ||
+            currentLlmState is LlmExecutionState.Initializing ||
+            currentLlmState is LlmExecutionState.Generating
+        ) {
             return
         }
 
@@ -100,7 +136,6 @@ class ModelImportViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch(Dispatchers.IO) {
             val activeFileName = previousMetadata?.internalFileName
             try {
-                // Query document details EXACTLY ONCE on Dispatchers.IO inside catch block
                 val (displayName, totalSize) = ModelStorageManager.queryUriDetails(app, uri)
                 val initialName = displayName ?: ""
 
@@ -124,6 +159,9 @@ class ModelImportViewModel(application: Application) : AndroidViewModel(applicat
                         )
                     }
                 )
+
+                // Reset previous LLM state on successful model import
+                llmRunner.resetState()
                 _uiState.value = ModelUiState.Imported(metadata)
 
             } catch (e: CancellationException) {
@@ -135,7 +173,7 @@ class ModelImportViewModel(application: Application) : AndroidViewModel(applicat
                 }
                 throw e
             } catch (e: IndeterminateStorageException) {
-                // Do NOT clean up files when storage state is indeterminate
+                // Restore IndeterminateError handling! Do NOT clean up temp files!
                 _uiState.value = ModelUiState.IndeterminateError(
                     message = e.localizedMessage ?: "Неопределённое состояние хранилища метаданных"
                 )
@@ -147,6 +185,41 @@ class ModelImportViewModel(application: Application) : AndroidViewModel(applicat
                     previousMetadata = previousMetadata
                 )
             }
+        }
+    }
+
+    fun runLlmTest() {
+        val currentImportState = _uiState.value
+        val currentLlmState = llmState.value
+
+        if (currentImportState is ModelUiState.Loading ||
+            currentImportState is ModelUiState.Importing ||
+            currentImportState is ModelUiState.IndeterminateError ||
+            currentLlmState is LlmExecutionState.Initializing ||
+            currentLlmState is LlmExecutionState.Generating
+        ) {
+            return
+        }
+
+        val importedMetadata = (currentImportState as? ModelUiState.Imported)?.metadata
+        if (importedMetadata == null) {
+            return
+        }
+
+        val app = getApplication<Application>()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val activeFile = ModelStorageManager.getActiveModelFile(app, importedMetadata.internalFileName)
+
+            if (!activeFile.exists() || !activeFile.isFile || activeFile.length() <= 0L || activeFile.length() != importedMetadata.sizeBytes) {
+                _uiState.value = ModelUiState.Corrupted(
+                    originalName = importedMetadata.originalName,
+                    message = "Файл импортированной модели «${importedMetadata.originalName}» не найден во внутреннем хранилище или повреждён. Требуется повторный импорт."
+                )
+                return@launch
+            }
+
+            llmRunner.runLlm(activeFile.absolutePath, _selectedPromptOption.value)
         }
     }
 }

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,8 +38,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
+import com.example.localnewsassistant.model.LlmExecutionResult
 import com.example.localnewsassistant.model.ModelImportValidator
 import com.example.localnewsassistant.model.ModelMetadata
+import com.example.localnewsassistant.model.TestPromptOption
+import com.example.localnewsassistant.ui.LlmExecutionState
 import com.example.localnewsassistant.ui.ModelImportViewModel
 import com.example.localnewsassistant.ui.ModelUiState
 import com.example.localnewsassistant.ui.theme.LocalNewsAssistantTheme
@@ -71,6 +75,8 @@ fun MainScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val llmState by viewModel.llmState.collectAsState()
+    val selectedPromptOption by viewModel.selectedPromptOption.collectAsState()
     var isInterfaceChecked by remember { mutableStateOf(false) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -83,7 +89,11 @@ fun MainScreen(
 
     MainScreenContent(
         uiState = uiState,
+        llmState = llmState,
+        selectedPromptOption = selectedPromptOption,
+        onSelectPromptOption = { viewModel.selectPromptOption(it) },
         onImportClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+        onRunLlmClick = { viewModel.runLlmTest() },
         onCheckInterfaceClick = { isInterfaceChecked = true },
         modifier = modifier,
         isInterfaceChecked = isInterfaceChecked
@@ -93,12 +103,22 @@ fun MainScreen(
 @Composable
 fun MainScreenContent(
     uiState: ModelUiState,
-    onImportClick: () -> Unit,
-    onCheckInterfaceClick: () -> Unit,
+    llmState: LlmExecutionState,
+    selectedPromptOption: TestPromptOption = TestPromptOption.OPTION_A,
+    onSelectPromptOption: (TestPromptOption) -> Unit = {},
+    onImportClick: () -> Unit = {},
+    onRunLlmClick: () -> Unit = {},
+    onCheckInterfaceClick: () -> Unit = {},
     modifier: Modifier = Modifier,
     isInterfaceChecked: Boolean = false
 ) {
-    val isActionDisabled = uiState is ModelUiState.Loading || uiState is ModelUiState.Importing || uiState is ModelUiState.IndeterminateError
+    val isBusy = uiState is ModelUiState.Loading ||
+            uiState is ModelUiState.Importing ||
+            uiState is ModelUiState.IndeterminateError ||
+            llmState is LlmExecutionState.Initializing ||
+            llmState is LlmExecutionState.Generating
+
+    val canRunLlm = uiState is ModelUiState.Imported && !isBusy
 
     Column(
         modifier = modifier
@@ -170,17 +190,67 @@ fun MainScreenContent(
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        LlmExecutionCard(state = llmState)
+
+        if (canRunLlm || llmState !is LlmExecutionState.Idle) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Тестовый вариант запроса:",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth(0.9f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                TestPromptOption.entries.forEach { option ->
+                    val isSelected = selectedPromptOption == option
+                    OutlinedButton(
+                        onClick = { onSelectPromptOption(option) },
+                        enabled = canRunLlm,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = if (isSelected) {
+                            ButtonDefaults.outlinedButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer
+                            )
+                        } else {
+                            ButtonDefaults.outlinedButtonColors()
+                        }
+                    ) {
+                        Text(
+                            text = option.label,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         Button(
             onClick = onImportClick,
-            enabled = !isActionDisabled,
+            enabled = !isBusy,
             modifier = Modifier.fillMaxWidth(0.8f)
         ) {
             Text("Импортировать модель")
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Button(
+            onClick = onRunLlmClick,
+            enabled = canRunLlm,
+            modifier = Modifier.fillMaxWidth(0.8f)
+        ) {
+            Text("Проверить LLM")
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
 
         OutlinedButton(
             onClick = onCheckInterfaceClick,
@@ -196,6 +266,101 @@ fun MainScreenContent(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
             )
+        }
+    }
+}
+
+@Composable
+fun LlmExecutionCard(state: LlmExecutionState) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when (state) {
+                is LlmExecutionState.Success -> MaterialTheme.colorScheme.primaryContainer
+                is LlmExecutionState.Error -> MaterialTheme.colorScheme.errorContainer
+                else -> MaterialTheme.colorScheme.surfaceVariant
+            }
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.Start
+        ) {
+            when (state) {
+                is LlmExecutionState.Idle -> {
+                    Text(
+                        text = "LLM ещё не запускалась",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                is LlmExecutionState.Initializing -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Инициализация модели...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                is LlmExecutionState.Generating -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Генерация ответа...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                is LlmExecutionState.Success -> {
+                    Text(
+                        text = "Ответ модели (LiteRT-LM):",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = state.result.responseText,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Инициализация: ${state.result.initTimeMs} мс | Генерация: ${state.result.inferenceTimeMs} мс | Backend: ${state.result.backendName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    )
+                }
+
+                is LlmExecutionState.Error -> {
+                    Text(
+                        text = "Ошибка запуска LLM",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = state.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
         }
     }
 }
@@ -393,7 +558,11 @@ fun MainScreenNoModelPreview() {
     LocalNewsAssistantTheme {
         MainScreenContent(
             uiState = ModelUiState.NoModel,
+            llmState = LlmExecutionState.Idle,
+            selectedPromptOption = TestPromptOption.OPTION_A,
+            onSelectPromptOption = {},
             onImportClick = {},
+            onRunLlmClick = {},
             onCheckInterfaceClick = {}
         )
     }
@@ -409,7 +578,11 @@ fun MainScreenImportingPreview() {
                 totalBytes = 1073741824L,
                 originalName = "gemma-2b-it-q4.litertlm"
             ),
+            llmState = LlmExecutionState.Idle,
+            selectedPromptOption = TestPromptOption.OPTION_A,
+            onSelectPromptOption = {},
             onImportClick = {},
+            onRunLlmClick = {},
             onCheckInterfaceClick = {}
         )
     }
@@ -424,29 +597,43 @@ fun MainScreenImportedPreview() {
                 metadata = ModelMetadata(
                     originalName = "gemma-2b-it-q4.litertlm",
                     sizeBytes = 1073741824L,
-                    internalFileName = "model_12345.bin"
+                    internalFileName = "model_12345.litertlm"
                 )
             ),
+            llmState = LlmExecutionState.Success(
+                LlmExecutionResult(
+                    responseText = "Локальная языковая модель — это нейросеть, выполняющая генерацию и обработку текста непосредственно на вашем устройстве без отправки данных в сеть.",
+                    initTimeMs = 1200L,
+                    inferenceTimeMs = 850L,
+                    backendName = "CPU"
+                )
+            ),
+            selectedPromptOption = TestPromptOption.OPTION_A,
+            onSelectPromptOption = {},
             onImportClick = {},
+            onRunLlmClick = {},
             onCheckInterfaceClick = {}
         )
     }
 }
 
-@Preview(showBackground = true, name = "4. Ошибка импорта")
+@Preview(showBackground = true, name = "4. Ошибка генерации LLM")
 @Composable
 fun MainScreenErrorPreview() {
     LocalNewsAssistantTheme {
         MainScreenContent(
-            uiState = ModelUiState.Error(
-                message = "Выбран неверный формат файла. Требуется файл с расширением .litertlm",
-                previousMetadata = ModelMetadata(
-                    originalName = "old_gemma-2b.litertlm",
-                    sizeBytes = 800000000L,
-                    internalFileName = "model_old.bin"
+            uiState = ModelUiState.Imported(
+                metadata = ModelMetadata(
+                    originalName = "gemma-2b-it-q4.litertlm",
+                    sizeBytes = 1073741824L,
+                    internalFileName = "model_12345.litertlm"
                 )
             ),
+            llmState = LlmExecutionState.Error("Ошибка инициализации модели: несовместимый формат весов"),
+            selectedPromptOption = TestPromptOption.OPTION_A,
+            onSelectPromptOption = {},
             onImportClick = {},
+            onRunLlmClick = {},
             onCheckInterfaceClick = {}
         )
     }
