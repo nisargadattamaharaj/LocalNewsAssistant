@@ -6,13 +6,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -41,10 +45,14 @@ import androidx.lifecycle.ViewModelProvider
 import com.example.localnewsassistant.model.LlmExecutionResult
 import com.example.localnewsassistant.model.ModelImportValidator
 import com.example.localnewsassistant.model.ModelMetadata
+import com.example.localnewsassistant.model.NewsSummaryResult
+import com.example.localnewsassistant.model.SyntheticNewsDataset
+import com.example.localnewsassistant.model.SyntheticNewsMessage
 import com.example.localnewsassistant.model.TestPromptOption
 import com.example.localnewsassistant.ui.LlmExecutionState
 import com.example.localnewsassistant.ui.ModelImportViewModel
 import com.example.localnewsassistant.ui.ModelUiState
+import com.example.localnewsassistant.ui.SummaryUiState
 import com.example.localnewsassistant.ui.theme.LocalNewsAssistantTheme
 
 class MainActivity : ComponentActivity() {
@@ -76,7 +84,9 @@ fun MainScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val llmState by viewModel.llmState.collectAsState()
+    val summaryState by viewModel.summaryState.collectAsState()
     val selectedPromptOption by viewModel.selectedPromptOption.collectAsState()
+    val isCoordinatorBusy by viewModel.isBusy.collectAsState()
     var isInterfaceChecked by remember { mutableStateOf(false) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -90,10 +100,13 @@ fun MainScreen(
     MainScreenContent(
         uiState = uiState,
         llmState = llmState,
+        summaryState = summaryState,
         selectedPromptOption = selectedPromptOption,
+        isCoordinatorBusy = isCoordinatorBusy,
         onSelectPromptOption = { viewModel.selectPromptOption(it) },
         onImportClick = { filePickerLauncher.launch(arrayOf("*/*")) },
         onRunLlmClick = { viewModel.runLlmTest() },
+        onRunSummaryClick = { viewModel.runNewsSummary() },
         onCheckInterfaceClick = { isInterfaceChecked = true },
         modifier = modifier,
         isInterfaceChecked = isInterfaceChecked
@@ -104,21 +117,29 @@ fun MainScreen(
 fun MainScreenContent(
     uiState: ModelUiState,
     llmState: LlmExecutionState,
+    summaryState: SummaryUiState = SummaryUiState.Idle,
     selectedPromptOption: TestPromptOption = TestPromptOption.OPTION_A,
+    isCoordinatorBusy: Boolean = false,
     onSelectPromptOption: (TestPromptOption) -> Unit = {},
     onImportClick: () -> Unit = {},
     onRunLlmClick: () -> Unit = {},
+    onRunSummaryClick: () -> Unit = {},
     onCheckInterfaceClick: () -> Unit = {},
     modifier: Modifier = Modifier,
     isInterfaceChecked: Boolean = false
 ) {
-    val isBusy = uiState is ModelUiState.Loading ||
+    val isBusy = isCoordinatorBusy ||
+            uiState is ModelUiState.Loading ||
             uiState is ModelUiState.Importing ||
             uiState is ModelUiState.IndeterminateError ||
             llmState is LlmExecutionState.Initializing ||
-            llmState is LlmExecutionState.Generating
+            llmState is LlmExecutionState.Generating ||
+            summaryState is SummaryUiState.PreparingData ||
+            summaryState is SummaryUiState.Initializing ||
+            summaryState is SummaryUiState.Generating
 
-    val canRunLlm = uiState is ModelUiState.Imported && !isBusy
+    val isIndeterminate = uiState is ModelUiState.IndeterminateError
+    val canRunLlm = uiState is ModelUiState.Imported && !isBusy && !isIndeterminate
 
     Column(
         modifier = modifier
@@ -192,6 +213,11 @@ fun MainScreenContent(
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        if (summaryState !is SummaryUiState.Idle) {
+            NewsSummaryCard(state = summaryState)
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
         LlmExecutionCard(state = llmState)
 
         if (canRunLlm || llmState !is LlmExecutionState.Idle) {
@@ -233,6 +259,27 @@ fun MainScreenContent(
         Spacer(modifier = Modifier.height(20.dp))
 
         Button(
+            onClick = onRunSummaryClick,
+            enabled = canRunLlm,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.tertiary
+            ),
+            modifier = Modifier.fillMaxWidth(0.8f)
+        ) {
+            Text("Сводка по тестовым новостям")
+        }
+
+        Text(
+            text = "3 синтетических сообщения. Не реальные новости.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Button(
             onClick = onImportClick,
             enabled = !isBusy,
             modifier = Modifier.fillMaxWidth(0.8f)
@@ -265,6 +312,245 @@ fun MainScreenContent(
                 text = "Интерфейс работает",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+@Composable
+fun NewsSummaryCard(state: SummaryUiState) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when (state) {
+                is SummaryUiState.Success -> MaterialTheme.colorScheme.secondaryContainer
+                is SummaryUiState.Error -> MaterialTheme.colorScheme.errorContainer
+                else -> MaterialTheme.colorScheme.surfaceVariant
+            }
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.Start
+        ) {
+            when (state) {
+                is SummaryUiState.Idle -> {}
+
+                is SummaryUiState.PreparingData -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Подготовка тестовых данных...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                is SummaryUiState.Initializing -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Инициализация модели...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                is SummaryUiState.Generating -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Генерация сводки...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                is SummaryUiState.Success -> {
+                    var showSources by remember { mutableStateOf(false) }
+                    var showRawResponse by remember { mutableStateOf(false) }
+
+                    Text(
+                        text = "Черновик сводки — требуется проверка фактов",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    if (state.summaryResult.bulletPoints.isNotEmpty()) {
+                        state.summaryResult.bulletPoints.forEach { point ->
+                            Column(modifier = Modifier.padding(bottom = 8.dp)) {
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Text(
+                                        text = "• ",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Text(
+                                        text = point.textWithoutCitation,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                                if (point.citedIds.isNotEmpty()) {
+                                    Text(
+                                        text = "Источники: [${point.citedIds.joinToString()}]",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (point.isValidCitation) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.padding(start = 12.dp, top = 2.dp)
+                                    )
+                                }
+                                if (!point.warningMessage.isNullOrBlank()) {
+                                    Text(
+                                        text = "⚠️ ${point.warningMessage}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.padding(start = 12.dp, top = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = state.summaryResult.rawResponse,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+
+                    if (state.summaryResult.warningMessages.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        state.summaryResult.warningMessages.forEach { warning ->
+                            Text(
+                                text = "⚠️ $warning",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "Инициализация: ${state.executionResult.initTimeMs} мс | Генерация: ${state.executionResult.inferenceTimeMs} мс",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = if (showRawResponse) "▼ Скрыть исходный ответ модели" else "► Показать исходный ответ модели",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { showRawResponse = !showRawResponse }
+                    )
+
+                    AnimatedVisibility(visible = showRawResponse) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Text(
+                                text = state.summaryResult.rawResponse,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = if (showSources) "▼ Скрыть исходные сообщения JSON" else "► Показать исходные сообщения JSON (${state.dataset.messages.size})",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { showSources = !showSources }
+                    )
+
+                    AnimatedVisibility(visible = showSources) {
+                        Column(modifier = Modifier.padding(top = 8.dp)) {
+                            state.dataset.messages.forEach { msg ->
+                                SourceMessageCard(msg = msg)
+                                Spacer(modifier = Modifier.height(6.dp))
+                            }
+                        }
+                    }
+                }
+
+                is SummaryUiState.Error -> {
+                    Text(
+                        text = "Ошибка генерации сводки",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = state.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SourceMessageCard(msg: SyntheticNewsMessage) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "[${msg.id}] ${msg.source}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = msg.publishedAt,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = msg.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
     }
@@ -563,6 +849,7 @@ fun MainScreenNoModelPreview() {
             onSelectPromptOption = {},
             onImportClick = {},
             onRunLlmClick = {},
+            onRunSummaryClick = {},
             onCheckInterfaceClick = {}
         )
     }
@@ -583,6 +870,7 @@ fun MainScreenImportingPreview() {
             onSelectPromptOption = {},
             onImportClick = {},
             onRunLlmClick = {},
+            onRunSummaryClick = {},
             onCheckInterfaceClick = {}
         )
     }
@@ -612,6 +900,7 @@ fun MainScreenImportedPreview() {
             onSelectPromptOption = {},
             onImportClick = {},
             onRunLlmClick = {},
+            onRunSummaryClick = {},
             onCheckInterfaceClick = {}
         )
     }
@@ -634,6 +923,7 @@ fun MainScreenErrorPreview() {
             onSelectPromptOption = {},
             onImportClick = {},
             onRunLlmClick = {},
+            onRunSummaryClick = {},
             onCheckInterfaceClick = {}
         )
     }
