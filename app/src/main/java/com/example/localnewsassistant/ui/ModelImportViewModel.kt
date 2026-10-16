@@ -18,7 +18,6 @@ import com.example.localnewsassistant.model.NewsSummaryResult
 import com.example.localnewsassistant.model.OperationCoordinator
 import com.example.localnewsassistant.model.OperationType
 import com.example.localnewsassistant.model.SyntheticNewsDataset
-import com.example.localnewsassistant.model.SyntheticNewsParser
 import com.example.localnewsassistant.model.TestPromptOption
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -117,7 +116,7 @@ object ModelImportFinalizer {
                         cancellationException.addSuppressed(cleanupException)
                         updateUiState(
                             ModelUiState.Error(
-                                message = "Импорт отменён, но произошла ошибка очистки временных файлов: ${cleanupException.localizedMessage}",
+                                message = "Импорт отменён, но произошла ошибка очистки временных файлов: ${cleanupException.localizedMessage ?: cleanupException.javaClass.simpleName}",
                                 previousMetadata = loadResult.metadata
                             )
                         )
@@ -138,7 +137,7 @@ object ModelImportFinalizer {
                         cancellationException.addSuppressed(cleanupException)
                         updateUiState(
                             ModelUiState.Error(
-                                message = "Импорт отменён, но произошла ошибка очистки временных файлов: ${cleanupException.localizedMessage}"
+                                message = "Импорт отменён, но произошла ошибка очистки временных файлов: ${cleanupException.localizedMessage ?: cleanupException.javaClass.simpleName}"
                             )
                         )
                     } else {
@@ -158,6 +157,151 @@ object ModelImportFinalizer {
         }
 
         throw cancellationException
+    }
+}
+
+object ModelImportErrorHandler {
+
+    suspend fun processImportErrorPipeline(
+        importException: Exception,
+        fallbackMetadata: ModelMetadata?,
+        loadMetadata: suspend () -> ModelLoadResult,
+        cleanTempFiles: suspend (activeFileName: String?) -> Unit,
+        updateUiState: (ModelUiState) -> Unit
+    ) {
+        try {
+            handleImportError(
+                importException = importException,
+                fallbackMetadata = fallbackMetadata,
+                loadMetadata = loadMetadata,
+                cleanTempFiles = cleanTempFiles,
+                updateUiState = updateUiState
+            )
+        } catch (cancellation: CancellationException) {
+            ModelImportFinalizer.handleImportCancellation(
+                cancellationException = cancellation,
+                loadMetadata = loadMetadata,
+                cleanTempFiles = cleanTempFiles,
+                updateUiState = updateUiState
+            )
+        }
+    }
+
+    suspend fun handleImportError(
+        importException: Exception,
+        fallbackMetadata: ModelMetadata?,
+        loadMetadata: suspend () -> ModelLoadResult,
+        cleanTempFiles: suspend (activeFileName: String?) -> Unit,
+        updateUiState: (ModelUiState) -> Unit
+    ) {
+        val userMsg = importException.localizedMessage ?: importException.javaClass.simpleName ?: "Не удалось скопировать файл модели"
+
+        try {
+            val loadResult = try {
+                loadMetadata()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IndeterminateStorageException) {
+                if (importException !== e) {
+                    importException.addSuppressed(e)
+                }
+                updateUiState(
+                    ModelUiState.IndeterminateError(
+                        message = "Ошибка при импорте: $userMsg. Хранилище в неопределённом состоянии: ${e.localizedMessage ?: e.javaClass.simpleName}"
+                    )
+                )
+                return
+            } catch (e: Exception) {
+                if (importException !== e) {
+                    importException.addSuppressed(e)
+                }
+                updateUiState(
+                    ModelUiState.IndeterminateError(
+                        message = "Ошибка при импорте: $userMsg. Не удалось установить состояние метаданных: ${e.localizedMessage ?: e.javaClass.simpleName}"
+                    )
+                )
+                return
+            }
+
+            when (loadResult) {
+                is ModelLoadResult.Valid -> {
+                    var cleanupException: Exception? = null
+                    try {
+                        cleanTempFiles(loadResult.metadata.internalFileName)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        cleanupException = e
+                    }
+
+                    val finalMsg = if (cleanupException != null) {
+                        if (importException !== cleanupException) {
+                            importException.addSuppressed(cleanupException)
+                        }
+                        val cleanMsg = cleanupException.localizedMessage ?: cleanupException.javaClass.simpleName ?: "ошибка очистки"
+                        "$userMsg (ошибка очистки временных файлов: $cleanMsg)"
+                    } else {
+                        userMsg
+                    }
+
+                    updateUiState(
+                        ModelUiState.Error(
+                            message = finalMsg,
+                            previousMetadata = loadResult.metadata
+                        )
+                    )
+                }
+
+                is ModelLoadResult.NoModel -> {
+                    var cleanupException: Exception? = null
+                    try {
+                        cleanTempFiles(null)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        cleanupException = e
+                    }
+
+                    val finalMsg = if (cleanupException != null) {
+                        if (importException !== cleanupException) {
+                            importException.addSuppressed(cleanupException)
+                        }
+                        val cleanMsg = cleanupException.localizedMessage ?: cleanupException.javaClass.simpleName ?: "ошибка очистки"
+                        "$userMsg (ошибка очистки временных файлов: $cleanMsg)"
+                    } else {
+                        userMsg
+                    }
+
+                    updateUiState(
+                        ModelUiState.Error(
+                            message = finalMsg,
+                            previousMetadata = null
+                        )
+                    )
+                }
+
+                is ModelLoadResult.Corrupted -> {
+                    // Do NOT call cleanTempFiles on corrupted storage!
+                    updateUiState(
+                        ModelUiState.IndeterminateError(
+                            message = "Ошибка при импорте: $userMsg. Метаданные повреждены: ${loadResult.message}"
+                        )
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (importException !== e) {
+                importException.addSuppressed(e)
+            }
+            updateUiState(
+                ModelUiState.Error(
+                    message = "$userMsg (ошибка восстановления: ${e.localizedMessage ?: e.javaClass.simpleName})",
+                    previousMetadata = fallbackMetadata
+                )
+            )
+        }
     }
 }
 
@@ -293,14 +437,12 @@ class ModelImportViewModel @JvmOverloads constructor(
                     message = e.localizedMessage ?: "Неопределённое состояние хранилища метаданных"
                 )
             } catch (e: Exception) {
-                withContext(Dispatchers.IO) {
-                    val activeFileName = (ModelStorageManager.loadMetadata(app) as? ModelLoadResult.Valid)?.metadata?.internalFileName
-                    ModelStorageManager.cleanTempFiles(app, activeFileName)
-                }
-                val userMsg = e.localizedMessage ?: "Не удалось скопировать файл модели"
-                _uiState.value = ModelUiState.Error(
-                    message = userMsg,
-                    previousMetadata = previousMetadata
+                ModelImportErrorHandler.processImportErrorPipeline(
+                    importException = e,
+                    fallbackMetadata = previousMetadata,
+                    loadMetadata = { ModelStorageManager.loadMetadata(app) },
+                    cleanTempFiles = { activeFileName -> ModelStorageManager.cleanTempFiles(app, activeFileName) },
+                    updateUiState = { newState -> _uiState.value = newState }
                 )
             }
         }

@@ -5,6 +5,7 @@ import com.example.localnewsassistant.model.ModelLoadResult
 import com.example.localnewsassistant.model.ModelMetadata
 import com.example.localnewsassistant.model.OperationCoordinator
 import com.example.localnewsassistant.model.OperationType
+import com.example.localnewsassistant.ui.ModelImportErrorHandler
 import com.example.localnewsassistant.ui.ModelImportFinalizer
 import com.example.localnewsassistant.ui.ModelUiState
 import kotlinx.coroutines.CancellationException
@@ -411,5 +412,183 @@ class ModelImportCancellationTest {
             assertTrue(e is AssertionError)
             assertEquals("Critical Assertion Failure", e.message)
         }
+    }
+
+    @Test
+    fun testErrorHandler_ImportErrorDiagnosisAndCleanupSuccessful() = runBlocking {
+        var cleanCalledWithFile: String? = null
+        var finalUiState: ModelUiState? = null
+        val importError = IOException("Stream copy failed")
+        val validMetadata = ModelMetadata("active.bin", 2000L, "model_active.bin")
+
+        ModelImportErrorHandler.processImportErrorPipeline(
+            importException = importError,
+            fallbackMetadata = null,
+            loadMetadata = { ModelLoadResult.Valid(validMetadata) },
+            cleanTempFiles = { active -> cleanCalledWithFile = active },
+            updateUiState = { newState -> finalUiState = newState }
+        )
+
+        assertEquals("model_active.bin", cleanCalledWithFile)
+        assertTrue(finalUiState is ModelUiState.Error)
+        val errorState = finalUiState as ModelUiState.Error
+        assertTrue(errorState.message.contains("Stream copy failed"))
+        assertEquals(validMetadata, errorState.previousMetadata)
+        assertFalse(finalUiState is ModelUiState.Importing)
+    }
+
+    @Test
+    fun testErrorHandler_ImportErrorAndSecondaryDiagnosisCorrupted() = runBlocking {
+        var cleanCalled = false
+        var finalUiState: ModelUiState? = null
+        val importError = IOException("Stream copy failed")
+
+        ModelImportErrorHandler.processImportErrorPipeline(
+            importException = importError,
+            fallbackMetadata = null,
+            loadMetadata = { ModelLoadResult.Corrupted("file.bin", 100L, "Storage corrupted") },
+            cleanTempFiles = { cleanCalled = true },
+            updateUiState = { newState -> finalUiState = newState }
+        )
+
+        assertFalse(cleanCalled)
+        assertTrue(finalUiState is ModelUiState.IndeterminateError)
+        val indError = finalUiState as ModelUiState.IndeterminateError
+        assertTrue(indError.message.contains("Stream copy failed"))
+        assertTrue(indError.message.contains("Storage corrupted"))
+        assertFalse(finalUiState is ModelUiState.Importing)
+    }
+
+    @Test
+    fun testErrorHandler_ImportErrorAndSecondaryCleanupFailsWithNullMessage() = runBlocking {
+        var finalUiState: ModelUiState? = null
+        val importError = IOException("Stream copy failed")
+        val cleanupError = IOException() // Exception with null localizedMessage!
+        val validMetadata = ModelMetadata("active.bin", 2000L, "model_active.bin")
+
+        ModelImportErrorHandler.processImportErrorPipeline(
+            importException = importError,
+            fallbackMetadata = null,
+            loadMetadata = { ModelLoadResult.Valid(validMetadata) },
+            cleanTempFiles = { throw cleanupError },
+            updateUiState = { newState -> finalUiState = newState }
+        )
+
+        assertTrue(finalUiState is ModelUiState.Error)
+        val errorState = finalUiState as ModelUiState.Error
+        assertTrue(errorState.message.contains("Stream copy failed"))
+        assertTrue(errorState.message.contains("ошибка очистки временных файлов"))
+        assertEquals(validMetadata, errorState.previousMetadata)
+        assertEquals(1, importError.suppressedExceptions.size)
+        assertEquals(cleanupError, importError.suppressedExceptions[0])
+        assertFalse(finalUiState is ModelUiState.Importing)
+    }
+
+    @Test
+    fun testErrorHandler_ActualConfirmedMetadataDiffersFromFallback() = runBlocking {
+        var finalUiState: ModelUiState? = null
+        val importError = IOException("Stream copy failed")
+        val fallbackMetadata = ModelMetadata("old.bin", 1000L, "model_old.bin")
+        val confirmedActualMetadata = ModelMetadata("new_actual.bin", 2000L, "model_new_actual.bin")
+
+        ModelImportErrorHandler.processImportErrorPipeline(
+            importException = importError,
+            fallbackMetadata = fallbackMetadata,
+            loadMetadata = { ModelLoadResult.Valid(confirmedActualMetadata) },
+            cleanTempFiles = {},
+            updateUiState = { newState -> finalUiState = newState }
+        )
+
+        assertTrue(finalUiState is ModelUiState.Error)
+        val errorState = finalUiState as ModelUiState.Error
+        assertEquals(confirmedActualMetadata, errorState.previousMetadata)
+    }
+
+    @Test
+    fun testErrorHandler_RealJobCancellationDuringSecondaryDiagnosis() = runBlocking {
+        val scope = CoroutineScope(Dispatchers.Default + Job())
+        val loadMetadataStarted = CompletableDeferred<Unit>()
+        val releaseLoadMetadata = CompletableDeferred<Unit>()
+        var finalUiState: ModelUiState = ModelUiState.Importing(copiedBytes = 0L, totalBytes = 100L, originalName = "model.bin")
+
+        val importError = IOException("Stream copy failed")
+
+        val job = scope.launch {
+            ModelImportErrorHandler.processImportErrorPipeline(
+                importException = importError,
+                fallbackMetadata = null,
+                loadMetadata = {
+                    loadMetadataStarted.complete(Unit)
+                    releaseLoadMetadata.await()
+                    ModelLoadResult.NoModel
+                },
+                cleanTempFiles = {},
+                updateUiState = { newState -> finalUiState = newState }
+            )
+        }
+
+        try {
+            withTimeout(5000) {
+                loadMetadataStarted.await()
+
+                val cancelReason = CancellationException("Cancelled during secondary diagnosis")
+                job.cancel(cancelReason)
+
+                releaseLoadMetadata.complete(Unit)
+
+                job.join()
+            }
+        } finally {
+            releaseLoadMetadata.complete(Unit)
+            scope.cancel()
+        }
+
+        assertTrue(job.isCancelled)
+        assertEquals(ModelUiState.NoModel, finalUiState)
+        assertFalse(finalUiState is ModelUiState.Importing)
+    }
+
+    @Test
+    fun testErrorHandler_RealJobCancellationDuringSecondaryCleanup() = runBlocking {
+        val scope = CoroutineScope(Dispatchers.Default + Job())
+        val cleanupStarted = CompletableDeferred<Unit>()
+        val releaseCleanup = CompletableDeferred<Unit>()
+        var finalUiState: ModelUiState = ModelUiState.Importing(copiedBytes = 0L, totalBytes = 100L, originalName = "model.bin")
+
+        val importError = IOException("Stream copy failed")
+        val validMetadata = ModelMetadata("active.bin", 2000L, "model_active.bin")
+
+        val job = scope.launch {
+            ModelImportErrorHandler.processImportErrorPipeline(
+                importException = importError,
+                fallbackMetadata = null,
+                loadMetadata = { ModelLoadResult.Valid(validMetadata) },
+                cleanTempFiles = {
+                    cleanupStarted.complete(Unit)
+                    releaseCleanup.await()
+                },
+                updateUiState = { newState -> finalUiState = newState }
+            )
+        }
+
+        try {
+            withTimeout(5000) {
+                cleanupStarted.await()
+
+                val cancelReason = CancellationException("Cancelled during secondary cleanup")
+                job.cancel(cancelReason)
+
+                releaseCleanup.complete(Unit)
+
+                job.join()
+            }
+        } finally {
+            releaseCleanup.complete(Unit)
+            scope.cancel()
+        }
+
+        assertTrue(job.isCancelled)
+        assertTrue(finalUiState is ModelUiState.Imported)
+        assertFalse(finalUiState is ModelUiState.Importing)
     }
 }
