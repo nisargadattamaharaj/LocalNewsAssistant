@@ -1,5 +1,15 @@
 package com.example.localnewsassistant.model
 
+import android.content.Context
+import android.util.JsonReader
+import android.util.JsonToken
+import java.io.InputStream
+import java.io.StringReader
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
+
 data class SyntheticNewsMessage(
     val id: String,
     val source: String,
@@ -17,157 +27,312 @@ data class SyntheticNewsDataset(
     }
 }
 
-object SyntheticNewsParser {
+object BoundedAssetReader {
 
-    const val MAX_ASSET_BYTES = 51200 // 50 KB
+    const val MAX_ASSET_BYTES = 51200 // 50 KB limit
+    private const val READ_BUFFER_SIZE = 8192
+
+    fun readBoundedStreamBytes(inputStream: InputStream, maxBytes: Int = MAX_ASSET_BYTES): ByteArray {
+        inputStream.use { input ->
+            val buffer = ByteArray(READ_BUFFER_SIZE)
+            var totalRead = 0
+            val byteList = java.io.ByteArrayOutputStream()
+
+            while (true) {
+                val bytesToRead = minOf(buffer.size, (maxBytes + 1) - totalRead)
+                if (bytesToRead <= 0) {
+                    throw IllegalArgumentException("Превышен прототипный лимит размера JSON файла (более $maxBytes байт).")
+                }
+
+                val read = input.read(buffer, 0, bytesToRead)
+                if (read == -1) break
+
+                totalRead += read
+                if (totalRead > maxBytes) {
+                    throw IllegalArgumentException("Превышен прототипный лимит размера JSON файла (более $maxBytes байт).")
+                }
+
+                byteList.write(buffer, 0, read)
+            }
+
+            return byteList.toByteArray()
+        }
+    }
+
+    fun decodeUtf8Strict(bytes: ByteArray): String {
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        return try {
+            decoder.decode(ByteBuffer.wrap(bytes)).toString()
+        } catch (e: Exception) {
+            throw IllegalArgumentException("Некорректная кодировка UTF-8 в исходном файле: ${e.localizedMessage}")
+        }
+    }
+}
+
+object SyntheticNewsValidator {
+
     const val MAX_MESSAGES_COUNT = 10
     const val MAX_SINGLE_TEXT_CHARS = 1000
     const val MAX_TOTAL_TEXT_CHARS = 3000
+    private val STRICT_ID_REGEX = Regex("^N\\d{3}$")
 
-    fun parseAndValidate(jsonString: String): SyntheticNewsDataset {
+    fun validateDataset(dataset: SyntheticNewsDataset): SyntheticNewsDataset {
+        if (dataset.datasetId.isBlank()) {
+            throw IllegalArgumentException("Поле datasetId в JSON не может быть пустым.")
+        }
+
+        if (!dataset.synthetic) {
+            throw IllegalArgumentException("Тестовый набор данных должен содержать параметр synthetic: true.")
+        }
+
+        if (dataset.messages.isEmpty()) {
+            throw IllegalArgumentException("Список сообщений messages в JSON не может быть пустым.")
+        }
+
+        if (dataset.messages.size > MAX_MESSAGES_COUNT) {
+            throw IllegalArgumentException("Превышено максимальное количество сообщений (${dataset.messages.size} > $MAX_MESSAGES_COUNT).")
+        }
+
+        val seenIds = mutableSetOf<String>()
+        var totalTextLength = 0
+
+        for ((index, msg) in dataset.messages.withIndex()) {
+            if (msg.id.isBlank()) {
+                throw IllegalArgumentException("Сообщение #$index имеет пустое поле id.")
+            }
+
+            if (!STRICT_ID_REGEX.matches(msg.id)) {
+                throw IllegalArgumentException("Сообщение #$index имеет некорректный формат id '${msg.id}' (ожидается N***).")
+            }
+
+            if (seenIds.contains(msg.id)) {
+                throw IllegalArgumentException("Обнаружен дубликат идентификатора новости: ${msg.id}.")
+            }
+            seenIds.add(msg.id)
+
+            if (msg.source.isBlank()) {
+                throw IllegalArgumentException("Сообщение ${msg.id} имеет пустое поле source.")
+            }
+
+            if (msg.publishedAt.isBlank()) {
+                throw IllegalArgumentException("Сообщение ${msg.id} имеет пустое поле publishedAt.")
+            }
+
+            try {
+                OffsetDateTime.parse(msg.publishedAt, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            } catch (_: Exception) {
+                throw IllegalArgumentException("Сообщение ${msg.id} имеет некорректную дату/время '${msg.publishedAt}' (ожидается формат ISO-8601 с часовым поясом).")
+            }
+
+            if (msg.text.isBlank()) {
+                throw IllegalArgumentException("Сообщение ${msg.id} имеет пустой текст text.")
+            }
+
+            if (msg.text.length > MAX_SINGLE_TEXT_CHARS) {
+                throw IllegalArgumentException("Длина текста новости ${msg.id} превышает лимит (${msg.text.length} > $MAX_SINGLE_TEXT_CHARS символов).")
+            }
+
+            totalTextLength += msg.text.length
+        }
+
+        if (totalTextLength > MAX_TOTAL_TEXT_CHARS) {
+            throw IllegalArgumentException("Суммарная длина текстов новостей ($totalTextLength символов) превышает лимит ($MAX_TOTAL_TEXT_CHARS символов).")
+        }
+
+        return dataset
+    }
+}
+
+object AndroidJsonReaderParser {
+
+    fun verifyNoSemicolonsOutsideStrings(json: String) {
+        var inString = false
+        var backslashCount = 0
+
+        for (i in json.indices) {
+            val char = json[i]
+
+            if (inString) {
+                if (char == '\\') {
+                    backslashCount++
+                } else if (char == '"') {
+                    if (backslashCount % 2 == 0) {
+                        inString = false
+                    }
+                    backslashCount = 0
+                } else {
+                    backslashCount = 0
+                }
+            } else {
+                if (char == '"') {
+                    inString = true
+                    backslashCount = 0
+                } else if (char == ';') {
+                    throw IllegalArgumentException("Обнаружен недопустимый разделитель ';' вне строкового значения в позиции $i.")
+                }
+            }
+        }
+    }
+
+    fun parseJson(jsonString: String): SyntheticNewsDataset {
         if (jsonString.isBlank()) {
             throw IllegalArgumentException("Тестовый JSON пуст.")
         }
 
-        val bytesSize = jsonString.toByteArray().size
-        if (bytesSize > MAX_ASSET_BYTES) {
-            throw IllegalArgumentException("Превышен прототипный лимит размера JSON файла ($bytesSize B > $MAX_ASSET_BYTES B).")
+        verifyNoSemicolonsOutsideStrings(jsonString)
+
+        val reader = JsonReader(StringReader(jsonString)).apply {
+            isLenient = false
         }
 
-        val datasetId = extractStringValue(jsonString, "datasetId")
-            ?: throw IllegalArgumentException("Поле datasetId в JSON не может быть пустым.")
-
-        val syntheticStr = extractPrimitiveValue(jsonString, "synthetic")
-        if (syntheticStr != "true") {
-            throw IllegalArgumentException("Тестовый набор данных должен содержать параметр synthetic: true.")
-        }
-
-        val messageObjects = extractJsonObjectsFromArray(jsonString, "messages")
-        if (messageObjects.isEmpty()) {
-            throw IllegalArgumentException("Список сообщений messages в JSON не может быть пустым.")
-        }
-
-        if (messageObjects.size > MAX_MESSAGES_COUNT) {
-            throw IllegalArgumentException("Превышено максимальное прототипное количество сообщений (${messageObjects.size} > $MAX_MESSAGES_COUNT).")
-        }
-
-        val messagesList = mutableListOf<SyntheticNewsMessage>()
-        val seenIds = mutableSetOf<String>()
-        var totalTextLength = 0
-
-        for ((index, objStr) in messageObjects.withIndex()) {
-            val id = extractStringValue(objStr, "id")?.trim()
-            if (id.isNullOrBlank()) {
-                throw IllegalArgumentException("Сообщение #$index имеет пустое поле id.")
-            }
-            if (seenIds.contains(id)) {
-                throw IllegalArgumentException("Обнаружен дубликат идентификатора новости: $id.")
-            }
-            seenIds.add(id)
-
-            val source = extractStringValue(objStr, "source")?.trim()
-            if (source.isNullOrBlank()) {
-                throw IllegalArgumentException("Сообщение $id имеет пустое поле source.")
+        return reader.use { jsonReader ->
+            if (jsonReader.peek() != JsonToken.BEGIN_OBJECT) {
+                throw IllegalArgumentException("Корневой элемент JSON должен быть объектом.")
             }
 
-            val publishedAt = extractStringValue(objStr, "publishedAt")?.trim()
-            if (publishedAt.isNullOrBlank()) {
-                throw IllegalArgumentException("Сообщение $id имеет пустое поле publishedAt.")
+            var datasetId: String? = null
+            var synthetic: Boolean? = null
+            var messages: List<SyntheticNewsMessage>? = null
+            val rootSeenKeys = mutableSetOf<String>()
+
+            jsonReader.beginObject()
+            while (jsonReader.hasNext()) {
+                val key = jsonReader.nextName()
+                if (rootSeenKeys.contains(key)) {
+                    throw IllegalArgumentException("Обнаружено дублирующееся корневое поле: '$key'.")
+                }
+                rootSeenKeys.add(key)
+
+                when (key) {
+                    "datasetId" -> {
+                        if (jsonReader.peek() != JsonToken.STRING) {
+                            throw IllegalArgumentException("Поле datasetId должно быть строковым значением (STRING).")
+                        }
+                        datasetId = jsonReader.nextString()
+                    }
+                    "synthetic" -> {
+                        if (jsonReader.peek() != JsonToken.BOOLEAN) {
+                            throw IllegalArgumentException("Поле synthetic должно быть логическим значением (BOOLEAN).")
+                        }
+                        synthetic = jsonReader.nextBoolean()
+                    }
+                    "messages" -> {
+                        if (jsonReader.peek() != JsonToken.BEGIN_ARRAY) {
+                            throw IllegalArgumentException("Поле messages должно быть массивом (ARRAY).")
+                        }
+                        messages = parseMessagesArray(jsonReader)
+                    }
+                    else -> {
+                        throw IllegalArgumentException("Обнаружено неизвестное корневое поле: '$key'.")
+                    }
+                }
             }
-            if (!publishedAt.contains("T")) {
-                throw IllegalArgumentException("Сообщение $id имеет некорректный формат даты publishedAt (ожидается формат ISO-8601).")
+            jsonReader.endObject()
+
+            if (jsonReader.peek() != JsonToken.END_DOCUMENT) {
+                throw IllegalArgumentException("Обнаружено постороннее содержимое после завершения корневого JSON-объекта.")
             }
 
-            val text = extractStringValue(objStr, "text")?.trim()
-            if (text.isNullOrBlank()) {
-                throw IllegalArgumentException("Сообщение $id имеет пустой текст text.")
-            }
-            if (text.length > MAX_SINGLE_TEXT_CHARS) {
-                throw IllegalArgumentException("Длина текста новости $id превышает прототипный лимит (${text.length} > $MAX_SINGLE_TEXT_CHARS символов).")
-            }
+            if (datasetId == null) throw IllegalArgumentException("Обязательное поле datasetId отсутствует в JSON.")
+            if (synthetic == null) throw IllegalArgumentException("Обязательное поле synthetic отсутствует в JSON.")
+            if (messages == null) throw IllegalArgumentException("Обязательное поле messages отсутствует в JSON.")
 
-            totalTextLength += text.length
-            messagesList.add(
-                SyntheticNewsMessage(
-                    id = id,
-                    source = source,
-                    publishedAt = publishedAt,
-                    text = text
-                )
+            SyntheticNewsDataset(
+                datasetId = datasetId,
+                synthetic = synthetic,
+                messages = messages
             )
         }
+    }
 
-        if (totalTextLength > MAX_TOTAL_TEXT_CHARS) {
-            throw IllegalArgumentException("Суммарная длина текстов новостей ($totalTextLength символов) превышает прототипный лимит ($MAX_TOTAL_TEXT_CHARS символов).")
+    private fun parseMessagesArray(jsonReader: JsonReader): List<SyntheticNewsMessage> {
+        val messages = mutableListOf<SyntheticNewsMessage>()
+        jsonReader.beginArray()
+        while (jsonReader.hasNext()) {
+            if (jsonReader.peek() != JsonToken.BEGIN_OBJECT) {
+                throw IllegalArgumentException("Элемент массива messages должен быть объектом.")
+            }
+            messages.add(parseMessageObject(jsonReader))
         }
+        jsonReader.endArray()
+        return messages
+    }
 
-        return SyntheticNewsDataset(
-            datasetId = datasetId,
-            synthetic = true,
-            messages = messagesList
+    private fun parseMessageObject(jsonReader: JsonReader): SyntheticNewsMessage {
+        var id: String? = null
+        var source: String? = null
+        var publishedAt: String? = null
+        var text: String? = null
+        val msgSeenKeys = mutableSetOf<String>()
+
+        jsonReader.beginObject()
+        while (jsonReader.hasNext()) {
+            val key = jsonReader.nextName()
+            if (msgSeenKeys.contains(key)) {
+                throw IllegalArgumentException("Обнаружено дублирующееся поле сообщения: '$key'.")
+            }
+            msgSeenKeys.add(key)
+
+            when (key) {
+                "id" -> {
+                    if (jsonReader.peek() != JsonToken.STRING) throw IllegalArgumentException("Поле id сообщения должно быть строкой.")
+                    id = jsonReader.nextString()
+                }
+                "source" -> {
+                    if (jsonReader.peek() != JsonToken.STRING) throw IllegalArgumentException("Поле source сообщения должно быть строкой.")
+                    source = jsonReader.nextString()
+                }
+                "publishedAt" -> {
+                    if (jsonReader.peek() != JsonToken.STRING) throw IllegalArgumentException("Поле publishedAt сообщения должно быть строкой.")
+                    publishedAt = jsonReader.nextString()
+                }
+                "text" -> {
+                    if (jsonReader.peek() != JsonToken.STRING) throw IllegalArgumentException("Поле text сообщения должно быть строкой.")
+                    text = jsonReader.nextString()
+                }
+                else -> {
+                    throw IllegalArgumentException("Обнаружено неизвестное поле в сообщении: '$key'.")
+                }
+            }
+        }
+        jsonReader.endObject()
+
+        if (id == null) throw IllegalArgumentException("Обязательное поле id отсутствует в сообщении.")
+        if (source == null) throw IllegalArgumentException("Обязательное поле source отсутствует в сообщении.")
+        if (publishedAt == null) throw IllegalArgumentException("Обязательное поле publishedAt отсутствует в сообщении.")
+        if (text == null) throw IllegalArgumentException("Обязательное поле text отсутствует в сообщении.")
+
+        return SyntheticNewsMessage(
+            id = id,
+            source = source,
+            publishedAt = publishedAt,
+            text = text
         )
     }
+}
 
-    private fun extractStringValue(json: String, key: String): String? {
-        val pattern = Regex("\"$key\"\\s*:\\s*\"((?:\\\\\"|[^\"])*)\"")
-        val match = pattern.find(json) ?: return null
-        return match.groupValues[1]
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\")
-            .replace("\\n", "\n")
-            .replace("\\r", "\r")
-            .replace("\\t", "\t")
+object SyntheticNewsAssetLoader {
+
+    fun loadAndValidateAsset(context: Context, assetName: String = "test_news.json"): SyntheticNewsDataset {
+        val inputStream = context.assets.open(assetName)
+        val bytes = BoundedAssetReader.readBoundedStreamBytes(inputStream)
+        val jsonString = BoundedAssetReader.decodeUtf8Strict(bytes)
+        val parsed = AndroidJsonReaderParser.parseJson(jsonString)
+        return SyntheticNewsValidator.validateDataset(parsed)
     }
+}
 
-    private fun extractPrimitiveValue(json: String, key: String): String? {
-        val pattern = Regex("\"$key\"\\s*:\\s*([true|false|\\d|.-]+)")
-        val match = pattern.find(json) ?: return null
-        return match.groupValues[1].trim()
-    }
-
-    private fun extractJsonObjectsFromArray(json: String, arrayKey: String): List<String> {
-        val arrayStartKey = "\"$arrayKey\"\\s*:\\s*\\["
-        val match = Regex(arrayStartKey).find(json) ?: return emptyList()
-        val startIndex = match.range.last + 1
-
-        var depth = 0
-        var arrayEndIndex = -1
-        for (i in startIndex until json.length) {
-            val char = json[i]
-            if (char == '[') depth++
-            else if (char == ']') {
-                if (depth == 0) {
-                    arrayEndIndex = i
-                    break
-                } else {
-                    depth--
-                }
-            }
+@Deprecated("Используйте SyntheticNewsAssetLoader или BoundedAssetReader + SyntheticNewsValidator")
+object SyntheticNewsParser {
+    fun parseAndValidate(jsonString: String): SyntheticNewsDataset {
+        val bytes = jsonString.toByteArray(Charsets.UTF_8)
+        if (bytes.size > BoundedAssetReader.MAX_ASSET_BYTES) {
+            throw IllegalArgumentException("Превышен прототипный лимит размера JSON файла (${bytes.size} B > ${BoundedAssetReader.MAX_ASSET_BYTES} B).")
         }
-
-        if (arrayEndIndex == -1) return emptyList()
-        val arrayContent = json.substring(startIndex, arrayEndIndex)
-
-        val objects = mutableListOf<String>()
-        var objDepth = 0
-        var objStart = -1
-
-        for (i in arrayContent.indices) {
-            val char = arrayContent[i]
-            if (char == '{') {
-                if (objDepth == 0) {
-                    objStart = i
-                }
-                objDepth++
-            } else if (char == '}') {
-                objDepth--
-                if (objDepth == 0 && objStart != -1) {
-                    objects.add(arrayContent.substring(objStart, i + 1))
-                    objStart = -1
-                }
-            }
-        }
-
-        return objects
+        val decoded = BoundedAssetReader.decodeUtf8Strict(bytes)
+        val parsed = AndroidJsonReaderParser.parseJson(decoded)
+        return SyntheticNewsValidator.validateDataset(parsed)
     }
 }

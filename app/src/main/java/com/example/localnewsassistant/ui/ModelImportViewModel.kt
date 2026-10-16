@@ -367,25 +367,15 @@ class ModelImportViewModel @JvmOverloads constructor(
                 return@tryRunOperation
             }
 
-            val jsonString = try {
+            val dataset = try {
                 withContext(Dispatchers.IO) {
-                    app.assets.open("test_news.json").bufferedReader().use { it.readText() }
+                    com.example.localnewsassistant.model.SyntheticNewsAssetLoader.loadAndValidateAsset(app, "test_news.json")
                 }
             } catch (e: CancellationException) {
                 _summaryState.value = SummaryUiState.Idle
                 throw e
             } catch (e: Exception) {
-                _summaryState.value = SummaryUiState.Error("Не удалось прочитать файл test_news.json из assets: ${e.localizedMessage}")
-                return@tryRunOperation
-            }
-
-            val dataset = try {
-                SyntheticNewsParser.parseAndValidate(jsonString)
-            } catch (e: CancellationException) {
-                _summaryState.value = SummaryUiState.Idle
-                throw e
-            } catch (e: Exception) {
-                _summaryState.value = SummaryUiState.Error("Ошибка валидации новостного набора данных: ${e.localizedMessage}")
+                _summaryState.value = SummaryUiState.Error("Ошибка загрузки/валидации новостных данных: ${e.localizedMessage}")
                 return@tryRunOperation
             }
 

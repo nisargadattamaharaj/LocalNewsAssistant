@@ -1,15 +1,49 @@
 package com.example.localnewsassistant
 
+import com.example.localnewsassistant.model.AndroidJsonReaderParser
+import com.example.localnewsassistant.model.BoundedAssetReader
 import com.example.localnewsassistant.model.NewsSummaryPostProcessor
 import com.example.localnewsassistant.model.NewsSummaryPromptBuilder
 import com.example.localnewsassistant.model.SyntheticNewsDataset
 import com.example.localnewsassistant.model.SyntheticNewsMessage
-import com.example.localnewsassistant.model.SyntheticNewsParser
+import com.example.localnewsassistant.model.SyntheticNewsValidator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.security.MessageDigest
+
+class TrackingInputStream(
+    private val delegate: InputStream,
+    private val throwOnRead: Boolean = false
+) : InputStream() {
+    var bytesReadCount = 0
+    var isClosed = false
+
+    override fun read(): Int {
+        if (throwOnRead) throw IOException("Simulated stream read error")
+        val b = delegate.read()
+        if (b != -1) bytesReadCount++
+        return b
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (throwOnRead) throw IOException("Simulated stream read error")
+        val count = delegate.read(b, off, len)
+        if (count != -1) bytesReadCount += count
+        return count
+    }
+
+    override fun close() {
+        isClosed = true
+        delegate.close()
+    }
+}
 
 class NewsSummaryTest {
 
@@ -225,7 +259,6 @@ class NewsSummaryTest {
         val result = NewsSummaryPostProcessor.processSummary(input, sampleDataset)
 
         assertTrue(result.areCitationsValid)
-        // Citation syntax/IDs are valid, but factual truth is NOT verified by citation syntax check
         assertTrue(result.bulletPoints[0].isValidCitation)
     }
 
@@ -233,38 +266,343 @@ class NewsSummaryTest {
     fun testP_PromptBuilderContainsDataDelimitersAndAllMessages() {
         val prompt = NewsSummaryPromptBuilder.buildPrompt(sampleDataset)
 
-        assertTrue(prompt.contains("<DATA_START>"))
-        assertTrue(prompt.contains("<DATA_END>"))
-        assertTrue(prompt.contains("[N001]"))
-        assertTrue(prompt.contains("[N002]"))
-        assertTrue(prompt.contains("[N003]"))
-        assertTrue(prompt.contains("Тестовый источник Альфа"))
-        assertTrue(prompt.contains("Ладоград"))
+        val dataStartMarker = "\n<DATA_START>\n"
+        val dataEndMarker = "\n<DATA_END>\n"
+
+        val dataStartPos = prompt.indexOf(dataStartMarker)
+        val dataEndPos = prompt.indexOf(dataEndMarker)
+        val finalSummaryPos = prompt.lastIndexOf("Сводка:")
+
+        assertTrue("Не найдена отдельная строка <DATA_START>", dataStartPos != -1)
+        assertTrue("Не найдена отдельная строка <DATA_END>", dataEndPos != -1)
+        assertTrue("Блок данных должен быть до финального приглашения Сводка:", dataEndPos < finalSummaryPos)
+
+        val dataBlock = prompt.substring(dataStartPos + dataStartMarker.length, dataEndPos)
+
+        val n001Pos = dataBlock.indexOf("[N001]")
+        val n002Pos = dataBlock.indexOf("[N002]")
+        val n003Pos = dataBlock.indexOf("[N003]")
+
+        assertTrue("N001 должен быть внутри блока данных", n001Pos != -1)
+        assertTrue("N002 должен быть внутри блока данных", n002Pos != -1)
+        assertTrue("N003 должен быть внутри блока данных", n003Pos != -1)
+        assertTrue("Порядок ID внутри блока данных должен сохраняться", n001Pos < n002Pos && n002Pos < n003Pos)
+
+        sampleDataset.messages.forEach { msg ->
+            assertTrue("Блок данных должен содержать ID ${msg.id}", dataBlock.contains(msg.id))
+            assertTrue("Блок данных должен содержать источник ${msg.source}", dataBlock.contains(msg.source))
+            assertTrue("Блок данных должен содержать дату ${msg.publishedAt}", dataBlock.contains(msg.publishedAt))
+            assertTrue("Блок данных должен содержать текст ${msg.text}", dataBlock.contains(msg.text))
+        }
+
+        val rulesBlock = prompt.substring(0, dataStartPos)
+        assertTrue(rulesBlock.contains("Отрази все разные события"))
+        assertTrue(rulesBlock.contains("сначала «- »"))
+        assertTrue(rulesBlock.contains("в самом конце реальные ID"))
+
+        assertFalse(prompt.contains("Лаборатория «Север» планирует открытие"))
     }
 
     @Test
-    fun testQ_SyntheticNewsParserSmokeTest() {
-        val jsonInput = """
-        {
-          "datasetId": "synthetic-news-v1",
-          "synthetic": true,
-          "messages": [
-            {
-              "id": "N001",
-              "source": "Тестовый источник Альфа",
-              "publishedAt": "2026-10-12T09:00:00+03:00",
-              "text": "Тестовый текст сообщения N001."
-            }
-          ]
+    fun testR_PromptBuilderDynamicInputChangesDataBlock() {
+        val customDataset = SyntheticNewsDataset(
+            datasetId = "custom-v1",
+            synthetic = true,
+            messages = listOf(
+                SyntheticNewsMessage(
+                    id = "X100",
+                    source = "Кастомный Источник",
+                    publishedAt = "2026-12-01T12:00:00Z",
+                    text = "Текст кастомной новости X100."
+                )
+            )
+        )
+
+        val customPrompt = NewsSummaryPromptBuilder.buildPrompt(customDataset)
+
+        assertTrue(customPrompt.contains("[X100]"))
+        assertTrue(customPrompt.contains("Кастомный Источник"))
+        assertTrue(customPrompt.contains("Текст кастомной новости X100."))
+        assertFalse(customPrompt.contains("[N001]"))
+    }
+
+    @Test
+    fun testS_PromptMetricsCalculation() {
+        val prompt = NewsSummaryPromptBuilder.buildPrompt(sampleDataset)
+        val bytes = prompt.toByteArray(Charsets.UTF_8)
+        val md = MessageDigest.getInstance("SHA-256")
+        val digest = md.digest(bytes)
+        val hex = digest.joinToString("") { "%02x".format(it) }
+
+        assertEquals(1509, prompt.length)
+        assertEquals(2595, bytes.size)
+        assertEquals("f13ed5220426b4e0583e28524728057e4ec9e798250db283312f8d6358be8ca3", hex)
+    }
+
+    @Test
+    fun testSemicolonGuard_RejectsSemicolonsOutsideStrings() {
+        try {
+            AndroidJsonReaderParser.verifyNoSemicolonsOutsideStrings("{\"datasetId\": \"v1\"; \"synthetic\": true}")
+            fail("Should reject semicolon between object fields")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("разделитель ';'"))
         }
-        """.trimIndent()
 
-        val parsedDataset = SyntheticNewsParser.parseAndValidate(jsonInput)
+        try {
+            AndroidJsonReaderParser.verifyNoSemicolonsOutsideStrings("{\"messages\": [1; 2]}")
+            fail("Should reject semicolon in array")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("разделитель ';'"))
+        }
+    }
 
-        assertEquals("synthetic-news-v1", parsedDataset.datasetId)
-        assertTrue(parsedDataset.synthetic)
-        assertEquals(1, parsedDataset.messages.size)
-        assertNotNull(parsedDataset.messageIndex["N001"])
-        assertEquals("Тестовый источник Альфа", parsedDataset.messageIndex["N001"]?.source)
+    @Test
+    fun testSemicolonGuard_AllowsSemicolonsInsideStringsAndEscapedQuotes() {
+        // Valid semicolon inside string
+        AndroidJsonReaderParser.verifyNoSemicolonsOutsideStrings("{\"text\": \"Текст; с точкой с запятой\"}")
+
+        // Valid semicolon inside string with escaped quotes
+        AndroidJsonReaderParser.verifyNoSemicolonsOutsideStrings("{\"text\": \"Текст \\\"Цитата;\\\" продолжение\"}")
+
+        // Escaped backslash before quote closes string, so semicolon after is outside string!
+        try {
+            AndroidJsonReaderParser.verifyNoSemicolonsOutsideStrings("{\"text\": \"значение\\\\\" ; \"key\": 1}")
+            fail("Should reject semicolon outside string after escaped backslash")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("разделитель ';'"))
+        }
+    }
+
+    @Test
+    fun testValidator_ValidDatasetPasses() {
+        val validated = SyntheticNewsValidator.validateDataset(sampleDataset)
+        assertEquals(sampleDataset, validated)
+    }
+
+    @Test
+    fun testValidator_RejectsBlankDatasetIdAndEmptyMessages() {
+        try {
+            SyntheticNewsValidator.validateDataset(sampleDataset.copy(datasetId = "   "))
+            fail("Should reject blank datasetId")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("datasetId"))
+        }
+
+        try {
+            SyntheticNewsValidator.validateDataset(sampleDataset.copy(messages = emptyList()))
+            fail("Should reject empty messages")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("messages"))
+        }
+    }
+
+    @Test
+    fun testValidator_RejectsSyntheticFalse() {
+        val invalid = sampleDataset.copy(synthetic = false)
+        try {
+            SyntheticNewsValidator.validateDataset(invalid)
+            fail("Should have rejected synthetic: false")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("synthetic: true"))
+        }
+    }
+
+    @Test
+    fun testValidator_RejectsInvalidAndDuplicateIds() {
+        val invalidDup = sampleDataset.copy(
+            messages = sampleDataset.messages + sampleDataset.messages[0]
+        )
+        try {
+            SyntheticNewsValidator.validateDataset(invalidDup)
+            fail("Should have rejected duplicate ID")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("дубликат"))
+        }
+
+        val invalidLowercase = sampleDataset.copy(
+            messages = listOf(sampleDataset.messages[0].copy(id = "n001"))
+        )
+        try {
+            SyntheticNewsValidator.validateDataset(invalidLowercase)
+            fail("Should have rejected lowercase id")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("некорректный формат id"))
+        }
+    }
+
+    @Test
+    fun testValidator_RejectsBlankFields() {
+        try {
+            SyntheticNewsValidator.validateDataset(sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(source = "  "))))
+            fail("Should reject blank source")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("source"))
+        }
+
+        try {
+            SyntheticNewsValidator.validateDataset(sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(text = "  "))))
+            fail("Should reject blank text")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("text"))
+        }
+    }
+
+    @Test
+    fun testValidator_ValidIsoOffsetDatesPass() {
+        val validUtc = sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(publishedAt = "2026-10-12T06:00:00Z")))
+        assertEquals(validUtc, SyntheticNewsValidator.validateDataset(validUtc))
+    }
+
+    @Test
+    fun testValidator_RejectsInvalidIsoDatesAndMissingOffset() {
+        val invalidLeap = sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(publishedAt = "2026-02-30T09:00:00+03:00")))
+        try {
+            SyntheticNewsValidator.validateDataset(invalidLeap)
+            fail("Should reject invalid leap day")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("некорректную дату"))
+        }
+
+        val missingOffset = sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(publishedAt = "2026-10-12T09:00:00")))
+        try {
+            SyntheticNewsValidator.validateDataset(missingOffset)
+            fail("Should reject date without timezone offset")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("некорректную дату"))
+        }
+
+        val notADate = sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(publishedAt = "NOT_A_DATE")))
+        try {
+            SyntheticNewsValidator.validateDataset(notADate)
+            fail("Should reject NOT_A_DATE")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("некорректную дату"))
+        }
+    }
+
+    @Test
+    fun testValidator_MessageCountLimit10Passed11Rejected() {
+        val tenMsgs = (1..10).map { i ->
+            val id = String.format("N%03d", i)
+            SyntheticNewsMessage(id, "Source", "2026-10-12T09:00:00Z", "Text $i")
+        }
+        val valid10 = SyntheticNewsDataset("v1", true, tenMsgs)
+        assertEquals(valid10, SyntheticNewsValidator.validateDataset(valid10))
+
+        val elevenMsgs = (1..11).map { i ->
+            val id = String.format("N%03d", i)
+            SyntheticNewsMessage(id, "Source", "2026-10-12T09:00:00Z", "Text $i")
+        }
+        val invalid11 = SyntheticNewsDataset("v1", true, elevenMsgs)
+        try {
+            SyntheticNewsValidator.validateDataset(invalid11)
+            fail("Should reject 11 messages")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Превышено максимальное количество"))
+        }
+    }
+
+    @Test
+    fun testValidator_SingleTextAndTotalTextLengthLimits() {
+        val text1000 = "a".repeat(1000)
+        val validSingle = sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(text = text1000)))
+        assertEquals(validSingle, SyntheticNewsValidator.validateDataset(validSingle))
+
+        val text1001 = "a".repeat(1001)
+        val invalidSingle = sampleDataset.copy(messages = listOf(sampleDataset.messages[0].copy(text = text1001)))
+        try {
+            SyntheticNewsValidator.validateDataset(invalidSingle)
+            fail("Should reject text over 1000 chars")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("превышает лимит"))
+        }
+
+        // Total text 3001 chars across 4 messages (<1000 each)
+        val msg1 = SyntheticNewsMessage("N001", "Source", "2026-10-12T09:00:00Z", "a".repeat(1000))
+        val msg2 = SyntheticNewsMessage("N002", "Source", "2026-10-12T09:00:00Z", "a".repeat(1000))
+        val msg3 = SyntheticNewsMessage("N003", "Source", "2026-10-12T09:00:00Z", "a".repeat(1000))
+        val msg4 = SyntheticNewsMessage("N004", "Source", "2026-10-12T09:00:00Z", "b") // Total 3001
+        val invalidTotal = SyntheticNewsDataset("v1", true, listOf(msg1, msg2, msg3, msg4))
+        try {
+            SyntheticNewsValidator.validateDataset(invalidTotal)
+            fail("Should reject total text over 3000 chars")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Суммарная длина"))
+        }
+    }
+
+    @Test
+    fun testBoundedReader_Exactly51200BytesAcceptedAndClosed() {
+        val exactData = ByteArray(51200) { 0x61 } // Exact 50 KB
+        val rawStream = ByteArrayInputStream(exactData)
+        val trackingStream = TrackingInputStream(rawStream)
+
+        val readBytes = BoundedAssetReader.readBoundedStreamBytes(trackingStream, 51200)
+        assertEquals(51200, readBytes.size)
+        assertTrue(trackingStream.isClosed)
+        assertEquals(51200, trackingStream.bytesReadCount)
+    }
+
+    @Test
+    fun testBoundedReader_51201BytesRejectedAndClosed() {
+        val overflowData = ByteArray(51201) { 0x61 } // 50 KB + 1 byte
+        val rawStream = ByteArrayInputStream(overflowData)
+        val trackingStream = TrackingInputStream(rawStream)
+
+        try {
+            BoundedAssetReader.readBoundedStreamBytes(trackingStream, 51200)
+            fail("Should reject 51201 bytes")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Превышен прототипный лимит"))
+        }
+        assertTrue(trackingStream.isClosed)
+        assertTrue(trackingStream.bytesReadCount <= 51201)
+    }
+
+    @Test
+    fun testBoundedReader_LargeStreamReadsAtMost51201BytesAndClosed() {
+        val largeData = ByteArray(100000) { 0x61 } // 100 KB stream
+        val rawStream = ByteArrayInputStream(largeData)
+        val trackingStream = TrackingInputStream(rawStream)
+
+        try {
+            BoundedAssetReader.readBoundedStreamBytes(trackingStream, 51200)
+            fail("Should reject stream over 50 KB")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Превышен прототипный лимит"))
+        }
+
+        assertTrue(trackingStream.isClosed)
+        assertTrue("Stream must NOT be fully read (read ${trackingStream.bytesReadCount} <= 51201)", trackingStream.bytesReadCount <= 51201)
+    }
+
+    @Test
+    fun testBoundedReader_IOExceptionPropagatesAndClosed() {
+        val rawStream = ByteArrayInputStream("test".toByteArray())
+        val trackingStream = TrackingInputStream(rawStream, throwOnRead = true)
+
+        try {
+            BoundedAssetReader.readBoundedStreamBytes(trackingStream, 51200)
+            fail("Should propagate IOException")
+        } catch (e: IOException) {
+            assertTrue(e.message!!.contains("Simulated stream read error"))
+        }
+        assertTrue(trackingStream.isClosed)
+    }
+
+    @Test
+    fun testBoundedReader_StrictUtf8DecoderRejectsMalformedBytesAndPreservesCyrillic() {
+        val cyrillicText = "Тестовая сводка новостей"
+        val validBytes = cyrillicText.toByteArray(Charsets.UTF_8)
+        val decoded = BoundedAssetReader.decodeUtf8Strict(validBytes)
+        assertEquals(cyrillicText, decoded)
+
+        val malformedUtf8 = byteArrayOf(0xC3.toByte(), 0x28.toByte()) // Invalid UTF-8 sequence
+        try {
+            BoundedAssetReader.decodeUtf8Strict(malformedUtf8)
+            fail("Should have rejected invalid UTF-8")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Некорректная кодировка UTF-8"))
+        }
     }
 }

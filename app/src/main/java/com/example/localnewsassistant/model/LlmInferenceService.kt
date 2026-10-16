@@ -32,6 +32,9 @@ class LiteRtLmInferenceService : LlmInferenceService {
 
     companion object {
         private const val TAG = "LocalNewsLlmTest"
+        private const val TARGET_TOP_K = 1
+        private const val TARGET_TOP_P = 0.95
+        private const val TARGET_TEMPERATURE = 0.8
     }
 
     override suspend fun generateResponse(
@@ -72,14 +75,14 @@ class LiteRtLmInferenceService : LlmInferenceService {
 
                     val conversationConfig = ConversationConfig(
                         samplerConfig = SamplerConfig(
-                            topK = 40,
-                            topP = 0.95,
-                            temperature = 0.8
+                            topK = TARGET_TOP_K,
+                            topP = TARGET_TOP_P,
+                            temperature = TARGET_TEMPERATURE
                         )
                     )
 
                     if (BuildConfig.DEBUG) {
-                        Log.d(TAG, "[$runId] Создание Conversation с настроенным SamplerConfig (topK=40, topP=0.95, temp=0.8)...")
+                        Log.d(TAG, "[$runId] Создание Conversation с настроенным SamplerConfig (topK=$TARGET_TOP_K, topP=$TARGET_TOP_P, temp=$TARGET_TEMPERATURE)...")
                     }
                     engine.createConversation(conversationConfig).use { conversation ->
                         if (BuildConfig.DEBUG) {

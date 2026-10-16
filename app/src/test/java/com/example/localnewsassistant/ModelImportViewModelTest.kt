@@ -4,8 +4,8 @@ import com.example.localnewsassistant.model.LlmExecutionResult
 import com.example.localnewsassistant.model.LlmInferenceService
 import com.example.localnewsassistant.model.NewsSummaryPostProcessor
 import com.example.localnewsassistant.model.NewsSummaryPromptBuilder
-import com.example.localnewsassistant.model.SyntheticNewsParser
-import com.example.localnewsassistant.ui.SummaryUiState
+import com.example.localnewsassistant.model.SyntheticNewsDataset
+import com.example.localnewsassistant.model.SyntheticNewsMessage
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -15,26 +15,24 @@ import org.junit.Test
 
 class ModelImportViewModelTest {
 
-    private val sampleJson = """
-    {
-      "datasetId": "synthetic-news-v1",
-      "synthetic": true,
-      "messages": [
-        {
-          "id": "N001",
-          "source": "Тестовый источник Альфа",
-          "publishedAt": "2026-10-12T09:00:00+03:00",
-          "text": "Вымышленный центр «Север» откроет лабораторию в Ладограде 15 октября 2026 года на 10 рабочих мест."
-        },
-        {
-          "id": "N002",
-          "source": "Тестовый источник Бета",
-          "publishedAt": "2026-10-12T10:00:00+03:00",
-          "text": "Вымышленная компания «Маяк» затормозила запуск сервиса «Обзор»."
-        }
-      ]
-    }
-    """.trimIndent()
+    private val sampleDataset = SyntheticNewsDataset(
+        datasetId = "synthetic-news-v1",
+        synthetic = true,
+        messages = listOf(
+            SyntheticNewsMessage(
+                id = "N001",
+                source = "Тестовый источник Альфа",
+                publishedAt = "2026-10-12T09:00:00+03:00",
+                text = "Вымышленный центр «Север» откроет лабораторию в Ладограде 15 октября 2026 года на 10 рабочих мест."
+            ),
+            SyntheticNewsMessage(
+                id = "N002",
+                source = "Тестовый источник Бета",
+                publishedAt = "2026-10-12T10:00:00+03:00",
+                text = "Вымышленная компания «Маяк» затормозила запуск сервиса «Обзор»."
+            )
+        )
+    )
 
     class ControllableSummaryLlmService : LlmInferenceService {
         var generateCallCount = 0
@@ -70,7 +68,7 @@ class ModelImportViewModelTest {
 
     @Test
     fun testSummaryPipelineWithParserPromptAndProcessor() {
-        val dataset = SyntheticNewsParser.parseAndValidate(sampleJson)
+        val dataset = sampleDataset
         val prompt = NewsSummaryPromptBuilder.buildPrompt(dataset)
 
         assertTrue(prompt.contains("<DATA_START>"))
@@ -88,7 +86,7 @@ class ModelImportViewModelTest {
 
     @Test
     fun testEmptyLlmResponseHandlingInSummary() {
-        val dataset = SyntheticNewsParser.parseAndValidate(sampleJson)
+        val dataset = sampleDataset
         val summaryResult = NewsSummaryPostProcessor.processSummary("", dataset)
 
         assertFalse(summaryResult.areCitationsValid)
