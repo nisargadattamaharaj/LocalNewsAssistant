@@ -12,6 +12,7 @@ import com.example.localnewsassistant.model.LlmInferenceService
 import com.example.localnewsassistant.model.ModelLoadResult
 import com.example.localnewsassistant.model.ModelMetadata
 import com.example.localnewsassistant.model.ModelStorageManager
+import com.example.localnewsassistant.model.NewsSummaryOrchestrator
 import com.example.localnewsassistant.model.NewsSummaryPostProcessor
 import com.example.localnewsassistant.model.NewsSummaryPromptBuilder
 import com.example.localnewsassistant.model.NewsSummaryResult
@@ -484,81 +485,43 @@ class ModelImportViewModel @JvmOverloads constructor(
             return
         }
 
-        val currentImportState = _uiState.value
-        val importedMetadata = (currentImportState as? ModelUiState.Imported)?.metadata
-        if (importedMetadata == null) {
-            _summaryState.value = SummaryUiState.Error("Модель не подключена. Сначала импортируйте файл модели.")
-            return
-        }
-
         coordinator.tryRunOperation(viewModelScope, OperationType.SUMMARY) {
-            _summaryState.value = SummaryUiState.PreparingData
-
             val app = getApplication<Application>()
-
-            val activeFile = withContext(Dispatchers.IO) {
-                ModelStorageManager.getActiveModelFile(app, importedMetadata.internalFileName)
-            }
-
-            val isFileValid = withContext(Dispatchers.IO) {
-                activeFile.exists() && activeFile.isFile && activeFile.length() > 0L && activeFile.length() == importedMetadata.sizeBytes
-            }
-
-            if (!isFileValid) {
-                _summaryState.value = SummaryUiState.Error("Файл импортированной модели «${importedMetadata.originalName}» не найден во внутреннем хранилище или повреждён. Требуется повторный импорт.")
-                return@tryRunOperation
-            }
-
-            val dataset = try {
-                withContext(Dispatchers.IO) {
-                    com.example.localnewsassistant.model.SyntheticNewsAssetLoader.loadAndValidateAsset(app, "test_news.json")
-                }
-            } catch (e: CancellationException) {
-                _summaryState.value = SummaryUiState.Idle
-                throw e
-            } catch (e: Exception) {
-                _summaryState.value = SummaryUiState.Error("Ошибка загрузки/валидации новостных данных: ${e.localizedMessage}")
-                return@tryRunOperation
-            }
-
-            val prompt = NewsSummaryPromptBuilder.buildPrompt(dataset)
-            _summaryState.value = SummaryUiState.Initializing
-
-            try {
-                val executionResult = llmInferenceService.generateResponse(
-                    modelFileAbsolutePath = activeFile.absolutePath,
-                    prompt = prompt,
-                    onInitFinished = {
-                        _summaryState.value = SummaryUiState.Generating
+            val currentImportState = _uiState.value
+            val importedMetadata = (currentImportState as? ModelUiState.Imported)?.metadata
+            val orchestrator = NewsSummaryOrchestrator(
+                llmInferenceService = llmInferenceService,
+                activeFileCheck = { internalFileName, expectedBytes ->
+                    withContext(Dispatchers.IO) {
+                        val file = ModelStorageManager.getActiveModelFile(app, internalFileName)
+                        if (file.exists() && file.isFile && file.length() > 0L && file.length() == expectedBytes) {
+                            NewsSummaryOrchestrator.FileValidationResult.Valid(file)
+                        } else {
+                            val msg = "Файл импортированной модели «${importedMetadata?.originalName ?: internalFileName}» не найден во внутреннем хранилище или повреждён. Требуется повторный импорт."
+                            NewsSummaryOrchestrator.FileValidationResult.Invalid(
+                                reason = msg,
+                                originalName = importedMetadata?.originalName ?: internalFileName
+                            )
+                        }
                     }
-                )
-
-                if (executionResult.responseText.isBlank()) {
-                    _summaryState.value = SummaryUiState.Error("Модель вернула пустой ответ при составлении сводки.")
-                    return@tryRunOperation
+                },
+                assetLoader = { assetName ->
+                    withContext(Dispatchers.IO) {
+                        com.example.localnewsassistant.model.SyntheticNewsAssetLoader.loadAndValidateAsset(app, assetName)
+                    }
                 }
+            )
 
-                val processedResult = NewsSummaryPostProcessor.processSummary(
-                    rawResponseText = executionResult.responseText,
-                    dataset = dataset
-                )
-
-                _summaryState.value = SummaryUiState.Success(
-                    dataset = dataset,
-                    summaryResult = processedResult,
-                    executionResult = executionResult
-                )
-
-            } catch (e: CancellationException) {
-                _summaryState.value = SummaryUiState.Idle
-                throw e
-            } catch (e: UnsatisfiedLinkError) {
-                val userMsg = e.localizedMessage ?: "Не удалось загрузить нативную библиотеку LiteRT-LM (UnsatisfiedLinkError)"
-                _summaryState.value = SummaryUiState.Error(userMsg)
-            } catch (e: Exception) {
-                val userMsg = e.localizedMessage ?: "Ошибка выполнения генерации сводки"
-                _summaryState.value = SummaryUiState.Error(userMsg)
-            }
+            orchestrator.executeSummaryPipeline(
+                importedMetadata = importedMetadata,
+                onStateChange = { newState -> _summaryState.value = newState },
+                onModelCorrupted = { origName, reason ->
+                    _uiState.value = ModelUiState.Corrupted(
+                        originalName = origName,
+                        message = reason
+                    )
+                }
+            )
         }
     }
 }
