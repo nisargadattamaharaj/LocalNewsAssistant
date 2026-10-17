@@ -1,0 +1,62 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "96837392ce3d595f91070619879777bf",
+    "entities": [
+      {
+        "tableName": "stored_news",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`datasetId` TEXT NOT NULL, `messageId` TEXT NOT NULL, `source` TEXT NOT NULL, `publishedAt` TEXT NOT NULL, `text` TEXT NOT NULL, `synthetic` INTEGER NOT NULL, PRIMARY KEY(`datasetId`, `messageId`))",
+        "fields": [
+          {
+            "fieldPath": "datasetId",
+            "columnName": "datasetId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageId",
+            "columnName": "messageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publishedAt",
+            "columnName": "publishedAt",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "synthetic",
+            "columnName": "synthetic",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "datasetId",
+            "messageId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '96837392ce3d595f91070619879777bf')"
+    ]
+  }
+}
