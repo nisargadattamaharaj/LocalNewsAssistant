@@ -566,6 +566,7 @@ class ModelImportCancellationTest {
                 cleanTempFiles = {
                     cleanupStarted.complete(Unit)
                     releaseCleanup.await()
+                    currentCoroutineContext().ensureActive()
                 },
                 updateUiState = { newState -> finalUiState = newState }
             )

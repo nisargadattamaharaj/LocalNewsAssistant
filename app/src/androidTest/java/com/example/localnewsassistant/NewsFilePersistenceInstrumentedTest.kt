@@ -523,4 +523,29 @@ class NewsFilePersistenceInstrumentedTest {
             performAllTestCleanup()
         }
     }
+
+    @Test
+    fun testScenarioI_CountReaderReadsZeroThenStoredSyntheticDataset() = runBlocking {
+        val isolatedDatabase = createTrackedDatabase()
+
+        val reader = com.example.localnewsassistant.data.local.NewsCountReader(
+            daoProvider = { isolatedDatabase.newsDao() },
+            ioDispatcher = kotlinx.coroutines.Dispatchers.IO
+        )
+
+        val initialCount = reader.getTotalCount()
+        assertEquals("Newly created isolated database should have 0 messages", 0, initialCount)
+
+        val dataset = SyntheticNewsAssetLoader.loadAndValidateAsset(context, "test_news.json")
+        assertTrue("Fixture must contain at least one message", dataset.messages.isNotEmpty())
+
+        SyntheticNewsStore(isolatedDatabase).storeDataset(dataset)
+
+        val expectedCount = dataset.messages.size
+        val countAfterStore = reader.getTotalCount()
+        assertEquals("NewsCountReader should return the exact number of stored synthetic messages", expectedCount, countAfterStore)
+
+        val countSecondRead = reader.getTotalCount()
+        assertEquals("NewsCountReader should return the identical count on subsequent read", expectedCount, countSecondRead)
+    }
 }
