@@ -1,28 +1,19 @@
 # Состояние проекта LocalNewsAssistant
 
 Редакция документа: 2026-10-20, MSK (UTC+3); точное время редакции не фиксируется.
-Контрольная точка документации: ROOM-READER-CHECKPOINT-45-VERIFIED.
-Основание: журналы 27D/28, результаты 29–30E, отчёт LOCALNEWS-CONTEXT-ALIGN-32, просмотр 33, сборка 34, инструментальный запуск 35, документальные коррекции 36–37, реализация 38, коррекция тестов 39, разбор 40, коррекция теста отмены 41, подтверждённая Android SQL-проверка `NewsCountReader` на POCO F3 (задача 42), документационные уточнения 43 и пользовательская приёмка ограниченного подэтапа Room (задача 45). Загрузка копий в Perplexity не производилась.
+Контрольная точка документации: ROOM-COUNT-UI-CHECKPOINT-53-VERIFIED.
+Основание: журналы 27D/28, результаты 29–30E, отчёт LOCALNEWS-CONTEXT-ALIGN-32, просмотр 33, сборка 34, инструментальный запуск 35, документальные коррекции 36–37, реализация 38, коррекция тестов 39, разбор 40, коррекция теста отмены 41, подтверждённая Android SQL-проверка `NewsCountReader` на POCO F3 (задача 42), документационные уточнения 43, приёмка 45, реализация UI-счётчика в задаче 48, исправление контрактов в задаче 50, установка APK в задаче 51, ручная проверка T1–T5 на POCO F3 в задаче 52 и пользовательская приёмка подэтапа ручного счётчика в задаче 53. Загрузка копий в Perplexity не производилась.
 
 ## Краткая точка входа для нового сеанса Gemini
 
 - Перенос контекста (задача 29) и техническая диагностика окружения (30–30E) полностью завершены в показанном объёме.
 - В проекте установлены действующие версии `PROJECT_STATE.md`, `ROADMAP.md`, `DECISIONS.md` и постоянные правила `AGENTS.md`. Прежние размеры и хеши документов являются историческими.
 - Состояние окружения и IDE: работа Gemini 3.6 Flash восстановлена после очистки `google_login*` и кешей Android Studio. В 30D подтверждено наличие JBR 25.0.3 и успешный вызов `./gradlew --version` c `JAVA_HOME`. Работа в IDE доказана, но долговременная стабильность и внутренние настройки IDE не объявляются проверенными.
-- Пользовательская приёмка (2026-10-20): Пользователем принят ограниченный технический подэтап (ленивый Application-владелец Room, NewsCountReader, его JVM-проверки, коррекция фейка отмены, Application-context smoke и изолированная Android SQL-проверка количества записей). Данная приёмка не распространяется на всю фазу Room/поиска, UI/ViewModel-потребитель, производственную news.db, process-death/reboot/power-loss/backup restore, релизную готовность или качество LLM.
-- Базовый commit до фиксации контрольной точки 45: `e0ac1cd27b9ee550e4254add09c5e3ef82721483`.
-- Статус Git: `main`, HEAD `e0ac1cd27b9ee550e4254add09c5e3ef82721483`; modified — `app/src/main/AndroidManifest.xml`, `app/src/androidTest/java/com/example/localnewsassistant/NewsFilePersistenceInstrumentedTest.kt`, `app/src/test/java/com/example/localnewsassistant/ModelImportCancellationTest.kt`, `docs/DECISIONS.md`, `docs/PROJECT_STATE.md`, `docs/ROADMAP.md`; untracked — `AGENTS.md`, `app/src/main/java/com/example/localnewsassistant/LocalNewsApplication.kt` (остаётся untracked относительно HEAD), `app/src/main/java/com/example/localnewsassistant/data/local/NewsCountReader.kt`, `app/src/test/java/com/example/localnewsassistant/NewsCountReaderTest.kt`, `app/src/androidTest/java/com/example/localnewsassistant/NewsApplicationInstrumentedTest.kt`; индекс пуст. Новых `commit` или `push` не выполнялось.
-- Статус первого пути чтения и Android SQL-проверки (38–43):
-  1. Реализован компонент `NewsCountReader` (`data/local/NewsCountReader.kt`), принимающий `daoProvider: () -> NewsDao` и `ioDispatcher: CoroutineDispatcher = Dispatchers.IO`. Внутри `withContext(ioDispatcher)` выполняется отложенное разрешение `daoProvider` и вызов существующего `suspend fun getTotalCount(): Int`.
-  2. В `LocalNewsApplication.kt` добавлено ленивое свойство `newsCountReader: NewsCountReader by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { NewsCountReader(daoProvider = { database.newsDao() }) }`.
-  3. В `NewsCountReaderTest.kt` написаны 7 JVM-тестов (`7 passed, 0 skipped, 0 failed`).
-  4. В `ModelImportCancellationTest.kt` добавлен `currentCoroutineContext().ensureActive()` в фейк `cleanTempFiles` (задача 41), что обеспечило 100% зелёный результат полного пакета JVM unit-тестов (`117 passed, 0 skipped, 0 failed`).
-  5. Метод `testScenarioI_CountReaderReadsZeroThenStoredSyntheticDataset` содержался в исходном локальном diff задачи 42 и был проверен сгенерированным тестом.
-  6. На физическом устройстве POCO F3 (`495755ca`, Android 13 / API 33) под `AndroidJUnitRunner` с помощью `/Users/a1/Documents/SDK/platform-tools/adb` успешно выполнены оба целевых инструментальных теста:
-     - `testScenarioI_CountReaderReadsZeroThenStoredSyntheticDataset`: **`OK (1 test)`** (Time: 0.129s). Подтверждено чтение 0 на пустой файловой тестовой БД `test_pers_<UUID>.db`, чтение количества сообщений `dataset.messages.size` после сохранения синтетического набора и стабильность повторного чтения. Вывод `OK (1 test)` отражает выполнение 1 теста, а не количество сохранённых сообщений.
-     - `NewsApplicationInstrumentedTest`: **`OK (1 test)`** (Time: 0.005s).
-  7. Границы подтверждения: Проверка выполнена на изолированной уникальной тестовой файловой базе данных harness. Свойства `LocalNewsApplication.database` и `newsCountReader` в этом методе не запрашивались. В показанном коде теста отсутствуют вызовы к `news.db`, но наблюдения за файловыми операциями всех компонентов процесса не проводилось (отсутствие любых обращений к БД не доказано). Реальные SQL-запросы к производственной БД, интеграция с UI/ViewModel, запуск с иконки лаунчера, поведение при `process death` и приёмка качества LLM остаются непроверенными.
-- Следующий шаг: сохранение контрольной точки 45 с локальным коммитом принятых изменений.
+- Независимое подтверждение публикации (2026-10-20): Подтверждено независимое чтение Perplexity: базовый checkpoint 45 зафиксирован в GitHub main на HEAD `6e9712cae71b3c8c131d952a98af4adee0ebfee5`.
+- Политическое правило Git: Публикацию (`git push`) на GitHub пользователь ВСЕГДА выполняет самостоятельно.
+- Пользовательская приёмка подэтапа (2026-10-20): Пользователем принят ограниченный технический подэтап ручного UI-счётчика новостей (задачи 48–52) с отдельным `NewsCountViewModel`, 10 целевыми JVM-тестами (`10 passed`), 127 общими JVM-тестами, установкой debug APK и отображением `«Сохранённые записи в БД: 0»` на POCO F3 (`495755ca`). Данная приёмка не распространяется на всю фазу Room/поиска, все 4 раздела UI, process-death/reboot persistence, инструментальное доказательство отсутствия повторных SQL, релизную готовность или качество LLM.
+- Базовый commit до фиксации контрольной точки 53: `6e9712cae71b3c8c131d952a98af4adee0ebfee5`.
+- Следующий шаг: ожидание следующего постановления задачи от пользователя.
 - Действующие ограничения: Качество сводок LLM не принято. Gemma, подбор моделей, prompt/sampling и исследования токенизации остаются на паузе.
 
 ## 1. Как читать этот документ

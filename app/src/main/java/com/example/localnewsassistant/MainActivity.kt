@@ -52,16 +52,27 @@ import com.example.localnewsassistant.model.TestPromptOption
 import com.example.localnewsassistant.ui.LlmExecutionState
 import com.example.localnewsassistant.ui.ModelImportViewModel
 import com.example.localnewsassistant.ui.ModelUiState
+import com.example.localnewsassistant.ui.NewsCountUiState
+import com.example.localnewsassistant.ui.NewsCountViewModel
+import com.example.localnewsassistant.ui.NewsCountViewModelFactory
 import com.example.localnewsassistant.ui.SummaryUiState
 import com.example.localnewsassistant.ui.theme.LocalNewsAssistantTheme
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var viewModel: ModelImportViewModel
+    private lateinit var newsCountViewModel: NewsCountViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewModel = ViewModelProvider(this)[ModelImportViewModel::class.java]
+
+        val app = application as LocalNewsApplication
+        newsCountViewModel = ViewModelProvider(
+            this,
+            NewsCountViewModelFactory(fetchCount = { app.newsCountReader.getTotalCount() })
+        )[NewsCountViewModel::class.java]
+
         enableEdgeToEdge()
 
         setContent {
@@ -69,6 +80,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     MainScreen(
                         viewModel = viewModel,
+                        newsCountViewModel = newsCountViewModel,
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -80,9 +92,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     viewModel: ModelImportViewModel,
+    newsCountViewModel: NewsCountViewModel,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val countState by newsCountViewModel.uiState.collectAsState()
     val llmState by viewModel.llmState.collectAsState()
     val summaryState by viewModel.summaryState.collectAsState()
     val selectedPromptOption by viewModel.selectedPromptOption.collectAsState()
@@ -99,10 +113,12 @@ fun MainScreen(
 
     MainScreenContent(
         uiState = uiState,
+        countState = countState,
         llmState = llmState,
         summaryState = summaryState,
         selectedPromptOption = selectedPromptOption,
         isCoordinatorBusy = isCoordinatorBusy,
+        onFetchCountClick = { newsCountViewModel.fetchNewsCount() },
         onSelectPromptOption = { viewModel.selectPromptOption(it) },
         onImportClick = { filePickerLauncher.launch(arrayOf("*/*")) },
         onRunLlmClick = { viewModel.runLlmTest() },
@@ -116,10 +132,12 @@ fun MainScreen(
 @Composable
 fun MainScreenContent(
     uiState: ModelUiState,
-    llmState: LlmExecutionState,
+    countState: NewsCountUiState = NewsCountUiState.NotRequested,
+    llmState: LlmExecutionState = LlmExecutionState.Idle,
     summaryState: SummaryUiState = SummaryUiState.Idle,
     selectedPromptOption: TestPromptOption = TestPromptOption.OPTION_A,
     isCoordinatorBusy: Boolean = false,
+    onFetchCountClick: () -> Unit = {},
     onSelectPromptOption: (TestPromptOption) -> Unit = {},
     onImportClick: () -> Unit = {},
     onRunLlmClick: () -> Unit = {},
@@ -210,6 +228,13 @@ fun MainScreenContent(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        LocalStorageCard(
+            state = countState,
+            onFetchCountClick = onFetchCountClick
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -926,5 +951,93 @@ fun MainScreenErrorPreview() {
             onRunSummaryClick = {},
             onCheckInterfaceClick = {}
         )
+    }
+}
+
+@Composable
+fun LocalStorageCard(
+    state: NewsCountUiState,
+    onFetchCountClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Локальное хранилище",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            when (state) {
+                is NewsCountUiState.NotRequested -> {
+                    Text(
+                        text = "Количество ещё не запрашивалось",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+                is NewsCountUiState.Loading -> {
+                    CircularProgressIndicator(modifier = Modifier.padding(vertical = 4.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Запрос количества записей...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (state.lastSuccessfulCount != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Предыдущее чтение: ${state.lastSuccessfulCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+                is NewsCountUiState.Success -> {
+                    Text(
+                        text = "Сохранённые записи в БД: ${state.count}",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+                is NewsCountUiState.Error -> {
+                    Text(
+                        text = "Ошибка: ${state.message}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center
+                    )
+                    if (state.lastSuccessfulCount != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Предыдущее чтение: ${state.lastSuccessfulCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = onFetchCountClick,
+                enabled = state !is NewsCountUiState.Loading,
+                modifier = Modifier.fillMaxWidth(0.8f)
+            ) {
+                Text("Обновить количество")
+            }
+        }
     }
 }
