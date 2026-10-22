@@ -1,5 +1,6 @@
 package com.example.localnewsassistant.data.local
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 
 @Entity(
@@ -12,5 +13,7 @@ data class StoredNewsEntity(
     val source: String,
     val publishedAt: String,
     val text: String,
+    @ColumnInfo(defaultValue = "''")
+    val normalizedText: String = "",
     val synthetic: Boolean
 )

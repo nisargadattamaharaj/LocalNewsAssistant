@@ -29,8 +29,8 @@ class NewsCountReaderTest {
         var countResult: Int = 0,
         var queryException: Exception? = null,
         var onQueryInvoked: (() -> Unit)? = null
-    ) : NewsDao {
-        override suspend fun upsertAll(entities: List<StoredNewsEntity>) {
+    ) : NewsDao() {
+        override suspend fun insertOrUpdateEntities(entities: List<StoredNewsEntity>) {
             throw UnsupportedOperationException("Not implemented for test")
         }
 
@@ -49,6 +49,10 @@ class NewsCountReaderTest {
         }
 
         override suspend fun getCountByDatasetId(datasetId: String): Int {
+            throw UnsupportedOperationException("Not implemented for test")
+        }
+
+        override suspend fun searchByText(escapedQuery: String): List<StoredNewsEntity> {
             throw UnsupportedOperationException("Not implemented for test")
         }
     }

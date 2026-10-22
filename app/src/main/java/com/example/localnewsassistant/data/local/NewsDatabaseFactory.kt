@@ -29,6 +29,8 @@ object NewsDatabaseFactory {
             context.applicationContext,
             NewsDatabase::class.java,
             dbFile.absolutePath
-        ).build()
+        )
+            .addMigrations(NewsDatabase.MIGRATION_1_2)
+            .build()
     }
 }
