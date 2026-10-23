@@ -52,9 +52,13 @@ import com.example.localnewsassistant.model.TestPromptOption
 import com.example.localnewsassistant.ui.LlmExecutionState
 import com.example.localnewsassistant.ui.ModelImportViewModel
 import com.example.localnewsassistant.ui.ModelUiState
+import com.example.localnewsassistant.ui.LocalSearchCard
 import com.example.localnewsassistant.ui.NewsCountUiState
 import com.example.localnewsassistant.ui.NewsCountViewModel
 import com.example.localnewsassistant.ui.NewsCountViewModelFactory
+import com.example.localnewsassistant.ui.NewsSearchUiState
+import com.example.localnewsassistant.ui.NewsSearchViewModel
+import com.example.localnewsassistant.ui.NewsSearchViewModelFactory
 import com.example.localnewsassistant.ui.SummaryUiState
 import com.example.localnewsassistant.ui.theme.LocalNewsAssistantTheme
 
@@ -62,6 +66,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var viewModel: ModelImportViewModel
     private lateinit var newsCountViewModel: NewsCountViewModel
+    private lateinit var newsSearchViewModel: NewsSearchViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +78,11 @@ class MainActivity : ComponentActivity() {
             NewsCountViewModelFactory(fetchCount = { app.newsCountReader.getTotalCount() })
         )[NewsCountViewModel::class.java]
 
+        newsSearchViewModel = ViewModelProvider(
+            this,
+            NewsSearchViewModelFactory(searchNews = { app.newsSearchReader.search(it) })
+        )[NewsSearchViewModel::class.java]
+
         enableEdgeToEdge()
 
         setContent {
@@ -81,6 +91,7 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         viewModel = viewModel,
                         newsCountViewModel = newsCountViewModel,
+                        newsSearchViewModel = newsSearchViewModel,
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -93,10 +104,12 @@ class MainActivity : ComponentActivity() {
 fun MainScreen(
     viewModel: ModelImportViewModel,
     newsCountViewModel: NewsCountViewModel,
+    newsSearchViewModel: NewsSearchViewModel,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val countState by newsCountViewModel.uiState.collectAsState()
+    val searchState by newsSearchViewModel.uiState.collectAsState()
     val llmState by viewModel.llmState.collectAsState()
     val summaryState by viewModel.summaryState.collectAsState()
     val selectedPromptOption by viewModel.selectedPromptOption.collectAsState()
@@ -114,11 +127,13 @@ fun MainScreen(
     MainScreenContent(
         uiState = uiState,
         countState = countState,
+        searchState = searchState,
         llmState = llmState,
         summaryState = summaryState,
         selectedPromptOption = selectedPromptOption,
         isCoordinatorBusy = isCoordinatorBusy,
         onFetchCountClick = { newsCountViewModel.fetchNewsCount() },
+        onSearchClick = { newsSearchViewModel.performSearch(it) },
         onSelectPromptOption = { viewModel.selectPromptOption(it) },
         onImportClick = { filePickerLauncher.launch(arrayOf("*/*")) },
         onRunLlmClick = { viewModel.runLlmTest() },
@@ -133,11 +148,13 @@ fun MainScreen(
 fun MainScreenContent(
     uiState: ModelUiState,
     countState: NewsCountUiState = NewsCountUiState.NotRequested,
+    searchState: NewsSearchUiState = NewsSearchUiState.NotRequested,
     llmState: LlmExecutionState = LlmExecutionState.Idle,
     summaryState: SummaryUiState = SummaryUiState.Idle,
     selectedPromptOption: TestPromptOption = TestPromptOption.OPTION_A,
     isCoordinatorBusy: Boolean = false,
     onFetchCountClick: () -> Unit = {},
+    onSearchClick: (String) -> Unit = {},
     onSelectPromptOption: (TestPromptOption) -> Unit = {},
     onImportClick: () -> Unit = {},
     onRunLlmClick: () -> Unit = {},
@@ -234,6 +251,13 @@ fun MainScreenContent(
         LocalStorageCard(
             state = countState,
             onFetchCountClick = onFetchCountClick
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        LocalSearchCard(
+            state = searchState,
+            onSearchClick = onSearchClick
         )
 
         Spacer(modifier = Modifier.height(16.dp))
